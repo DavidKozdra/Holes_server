@@ -11,7 +11,7 @@ let { players } = globals;
 const ServerLogo = (process.env.SERVER_LOGO===""|| process.env.SERVER_LOGO === null ) ? process.env.SERVER_LOGO: './logo.png';
 const ServerName = process.env.SERVER_NAME || "TEST";
 const RULES = process.env.RULES;
-const get_max = parseFloat(process.env.MAX) || 1;
+const get_max = parseFloat(process.env.MAX) || 10;
 
 exports.getStatus = (req, res) => {
   console.log('Status requested');
@@ -25,9 +25,8 @@ exports.getStatus = (req, res) => {
   res.json({
     status: 'Online',
     playerCount: players ? Object.keys(players).length : 0,
-    image: `data:image/png;base64,${base64Image}`,  // <- binary as base64
+    image: `data:image/png;base64,${base64Image}`,  
     name: ServerName,
     max: get_max,
-
   });
 };

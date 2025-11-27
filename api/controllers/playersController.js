@@ -2,6 +2,8 @@ const { getGlobals } = require('../../globals');
 const dotenv = require('dotenv');
 dotenv.config();
 
+
+const globals = getGlobals();
 exports.getPlayerInfo = (req, res) => {
 
   const { players } = globals;
