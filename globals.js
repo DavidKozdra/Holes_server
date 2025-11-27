@@ -1,20 +1,22 @@
-const {Map} = require("./utils/map")
+const { Map } = require('./utils/map');
 
 let players = {};
 let traps = {};
-let serverMap = new Map(Math.random())
+let serverMap = new Map(Math.random());
 let chatMessages = [
-    {
-      message: "Hello, welcome to the chat!",
-      x: 0,
-      y: 0,
-      user: "Server"
-    }
-  ];
-  
+  {
+    message: 'Hello, welcome to the chat!',
+    x: 0,
+    y: 0,
+    user: 'Server',
+  },
+];
 
 function getGlobals() {
-    return { players, traps, serverMap,chatMessages };
+  // needs to request to the server no ?
+  // might send too much text maybe filtering the last chats 
+  // this should be more functional ...
+  return { players, traps, serverMap, chatMessages };
 }
 
 // Ensure correct export
