@@ -3,6 +3,7 @@ const socket = require('socket.io');
 const cors = require('cors');
 const { validColors } = require('./utils/color');
 const { Map, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
+const { saveState, loadState } = require('./utils/persistence');
 const { getGlobals } = require('./globals'); // Ensure correct import
 const { exec } = require('child_process');
 const globals = getGlobals(); // Now it correctly retrieves global variables
@@ -30,6 +31,7 @@ const allRoutes = require('./api/routes/Routes');
 const port = process.env.PORT || 3000;
 const app = express();
 const MAX_PLAYERS = parseInt(process.env.MAX, 10) || 10;
+const SAVE_INTERVAL_HOURS = parseFloat(process.env.SAVE_INTERVAL_HOURS || '3');
 
 // ✅ Basic bad word filter (case-insensitive)
 const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag'];
@@ -64,6 +66,63 @@ const io = socket(server, {
 io.sockets.on('connection', newConnection);
 
 app.use(allRoutes);
+
+// Attempt to load saved world state on startup
+(function bootstrapLoad() {
+  try {
+    const loaded = loadState();
+    if (loaded && loaded.serverMap) {
+      // Reconstruct serverMap from saved data
+      const seed = loaded.serverMap.seed || Math.random();
+      serverMap = new Map(seed);
+
+      const keys = Object.keys(loaded.serverMap.chunks || {});
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const raw = loaded.serverMap.chunks[key];
+        const ch = new Chunk(raw.cx, raw.cy);
+        ch.data = raw.data || {};
+        ch.iron_data = raw.iron_data || {};
+        ch.objects = raw.objects || [];
+        ch.projectiles = raw.projectiles || [];
+        ch.soundObjs = raw.soundObjs || [];
+        serverMap.chunks[key] = ch;
+      }
+
+      serverMap.brains = loaded.serverMap.brains || [];
+
+      // Restore teams if present
+      teams = loaded.teams || teams;
+
+      // Keep globals in sync
+      globals.serverMap = serverMap;
+      globals.teams = teams;
+
+      console.log('[Persistence] World state loaded with', keys.length, 'chunks');
+    } else {
+      console.log('[Persistence] No saved world found, starting fresh');
+    }
+  } catch (e) {
+    console.error('[Persistence] Failed to load world state:', e);
+  }
+})();
+
+// Periodic autosave
+setInterval(() => {
+  const ok = saveState({ players, serverMap, chatMessages, teams });
+  if (ok) {
+    console.log('[Persistence] Autosaved world state');
+  }
+}, Math.max(0.1, SAVE_INTERVAL_HOURS) * 60 * 60 * 1000);
+
+// Save on graceful shutdown
+['SIGINT', 'SIGTERM'].forEach((sig) => {
+  process.on(sig, () => {
+    console.log(`[Persistence] Received ${sig}, saving world state...`);
+    try { saveState({ players, serverMap, chatMessages, teams }); } catch {}
+    process.exit(0);
+  });
+});
 
 function newConnection(socket) {
   try {
@@ -898,13 +957,13 @@ function newConnection(socket) {
       let tempData = {};
       for (let x = 0; x < CHUNKSIZE; x++) {
         for (let y = 0; y < CHUNKSIZE; y++) {
-          tempData[x + y / CHUNKSIZE] = chunk.data[x + y / CHUNKSIZE];
+          tempData[x + y * CHUNKSIZE] = chunk.data[x + y * CHUNKSIZE];
         }
       }
       let tempData2 = {};
       for (let x = 0; x < CHUNKSIZE; x++) {
         for (let y = 0; y < CHUNKSIZE; y++) {
-          tempData2[x + y / CHUNKSIZE] = chunk.iron_data[x + y / CHUNKSIZE];
+          tempData2[x + y * CHUNKSIZE] = chunk.iron_data[x + y * CHUNKSIZE];
         }
       }
       io.to(socket.id).emit('GIVE_CHUNK', {

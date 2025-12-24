@@ -59,7 +59,7 @@ class Chunk {
     if (Math.abs(this.cx) > 25 || Math.abs(this.cy) > 25) {
       for (let x = 0; x < CHUNKSIZE; x++) {
         for (let y = 0; y < CHUNKSIZE; y++) {
-          const index = x + y / CHUNKSIZE;
+          const index = x + y * CHUNKSIZE;
           this.data[index] = 0;
           this.iron_data[index] = 0;
 
@@ -91,10 +91,10 @@ class Chunk {
         //     continue;
         // }
         const OFF = TILESIZE * TILESIZE;
-        const index = x + y / CHUNKSIZE;
+        const index = x + y * CHUNKSIZE;
         const nx = this.NOISE_SCALE * (x + OFF + this.cx * TILESIZE * CHUNKSIZE);
         const ny = this.NOISE_SCALE * (y + OFF + this.cy * TILESIZE * CHUNKSIZE);
-        this.data[x + y / CHUNKSIZE] =
+        this.data[x + y * CHUNKSIZE] =
           noise2D(this.NOISE_SCALE * (x + 1), this.NOISE_SCALE * (y + 1)) / 2 + 0.5; //! why doing this 2 times?
         this.data[index] -= (noise2D(nx, ny) / 2 + 0.5) * 0.25; //! why doing this 2 times?
         this.data[index] *= 1.5;
@@ -108,7 +108,7 @@ class Chunk {
           const iron_scale = 0.2;
           const nx2 = this.NOISE_SCALE * iron_scale * (x + OFF + this.cx * TILESIZE * CHUNKSIZE);
           const ny2 = this.NOISE_SCALE * iron_scale * (y + OFF + this.cy * TILESIZE * CHUNKSIZE);
-          this.iron_data[x + y / CHUNKSIZE] =
+          this.iron_data[x + y * CHUNKSIZE] =
             noise2D(
               this.NOISE_SCALE * iron_scale * (x + 1 + 2000),
               this.NOISE_SCALE * iron_scale * (y + 1 - 2000),
@@ -188,8 +188,8 @@ class Chunk {
       for (let x = structX - 5; x < structX + 5; x++) {
         for (let y = structY - 5; y < structY + 5; y++) {
           if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-            this.data[x + y / CHUNKSIZE] = 0;
-            this.iron_data[x + y / CHUNKSIZE] = 0;
+            this.data[x + y * CHUNKSIZE] = 0;
+            this.iron_data[x + y * CHUNKSIZE] = 0;
           }
         }
       }
@@ -253,8 +253,8 @@ class Chunk {
       for (let x = structX - 5; x < structX + 5; x++) {
         for (let y = structY - 5; y < structY + 5; y++) {
           if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-            this.data[x + y / CHUNKSIZE] = 0;
-            this.iron_data[x + y / CHUNKSIZE] = 0;
+            this.data[x + y * CHUNKSIZE] = 0;
+            this.iron_data[x + y * CHUNKSIZE] = 0;
           }
         }
       }
@@ -262,8 +262,8 @@ class Chunk {
       //forest chunk
       for (let x = 3; x < CHUNKSIZE - 3; x++) {
         for (let y = 3; y < CHUNKSIZE - 3; y++) {
-          this.data[x + y / CHUNKSIZE] = 0;
-          this.iron_data[x + y / CHUNKSIZE] = 0;
+          this.data[x + y * CHUNKSIZE] = 0;
+          this.iron_data[x + y * CHUNKSIZE] = 0;
 
           if (x > 4 && x < CHUNKSIZE - 4 && y > 4 && y < CHUNKSIZE - 4) {
             if (Math.random() < 0.05) {
@@ -354,8 +354,8 @@ class Chunk {
       for (let x = sructX - 5; x < sructX + 5; x++) {
         for (let y = structY - 5; y < structY + 5; y++) {
           if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-            this.data[x + y / CHUNKSIZE] = 0;
-            this.iron_data[x + y / CHUNKSIZE] = 0;
+            this.data[x + y * CHUNKSIZE] = 0;
+            this.iron_data[x + y * CHUNKSIZE] = 0;
           }
         }
       }
@@ -363,9 +363,9 @@ class Chunk {
       let old_dirt = [];
       for (let x = 7; x < CHUNKSIZE - 7; x++) {
         for (let y = 7; y < CHUNKSIZE - 7; y++) {
-          old_dirt[x + y / CHUNKSIZE] = this.data[x + y / CHUNKSIZE];
-          this.data[x + y / CHUNKSIZE] = 0;
-          this.iron_data[x + y / CHUNKSIZE] = 0;
+          old_dirt[x + y * CHUNKSIZE] = this.data[x + y * CHUNKSIZE];
+          this.data[x + y * CHUNKSIZE] = 0;
+          this.iron_data[x + y * CHUNKSIZE] = 0;
         }
       }
       for (let x = 0; x < 9; x++) {
@@ -452,8 +452,8 @@ class Chunk {
               else {
                 for (let i = 0; i < 4; i++) {
                   for (let j = 0; j < 4; j++) {
-                    this.data[x * 4 + 7 + i + (y * 4 + 7 + j) / CHUNKSIZE] =
-                      old_dirt[x * 4 + 7 + i + (y * 4 + 7 + j) / CHUNKSIZE];
+                      this.data[x * 4 + 7 + i + (y * 4 + 7 + j) * CHUNKSIZE] =
+                        old_dirt[x * 4 + 7 + i + (y * 4 + 7 + j) * CHUNKSIZE];
                   }
                 }
               }
@@ -549,16 +549,16 @@ class Chunk {
             else {
               for (let i = 0; i < 4; i++) {
                 for (let j = 0; j < 4; j++) {
-                  this.data[x * 4 + 7 + i + (y * 4 + 7 + j) / CHUNKSIZE] =
-                    old_dirt[x * 4 + 7 + i + (y * 4 + 7 + j) / CHUNKSIZE];
+                  this.data[x * 4 + 7 + i + (y * 4 + 7 + j) * CHUNKSIZE] =
+                    old_dirt[x * 4 + 7 + i + (y * 4 + 7 + j) * CHUNKSIZE];
                 }
               }
             }
             if (Math.random() < 0.3) {
               for (let i = 0; i < 4; i++) {
                 for (let j = 0; j < 4; j++) {
-                  this.data[x * 4 + 7 + i + (y * 4 + 7 + j) / CHUNKSIZE] =
-                    old_dirt[x * 4 + 7 + i + (y * 4 + 7 + j) / CHUNKSIZE];
+                  this.data[x * 4 + 7 + i + (y * 4 + 7 + j) * CHUNKSIZE] =
+                    old_dirt[x * 4 + 7 + i + (y * 4 + 7 + j) * CHUNKSIZE];
                 }
               }
             }
