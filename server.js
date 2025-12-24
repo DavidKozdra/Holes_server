@@ -5,6 +5,12 @@ const { validColors } = require('./utils/color');
 const { Map, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
 const { saveState, loadState } = require('./utils/persistence');
 const { logger, DATA_DIR } = require('./utils/logger');
+const {
+  singlePlayerWorlds,
+  singlePlayerWorldMeta,
+  ensureWorld,
+  loadFromPersistence: loadWorldsFromPersistence,
+} = require('./utils/worldsStore');
 const fs = require('fs');
 const { getGlobals } = require('./globals'); // Ensure correct import
 const { exec } = require('child_process');
@@ -51,11 +57,13 @@ if (TIMER_DISABLED) {
   countdown = Number.isFinite(parsed) && parsed > 0 ? parsed : 60 * 60 * 24 * 10000; // default very long
 }
 console.log(TIMER_DISABLED ? 'Timer disabled' : `COUNT: ${countdown}`);
-const allRoutes = require('./api/routes/Routes');
+const routes = require('./api/routes/Routes');
 const port = process.env.PORT || 3000;
 const app = express();
 const MAX_PLAYERS = parseInt(process.env.MAX, 10) || 10;
 const SAVE_INTERVAL_HOURS = parseFloat(process.env.SAVE_INTERVAL_HOURS || '3');
+
+app.use(express.json());
 
 // ✅ Basic bad word filter (case-insensitive)
 const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag'];
@@ -90,8 +98,22 @@ const io = socket(server, {
 
 io.sockets.on('connection', newConnection);
 
-app.use(allRoutes);
+// Expose state refs for controllers
+app.locals.stateRefs = {
+  players,
+  serverMap,
+  chatMessages,
+  teams,
+  savedPlayersByName,
+  singlePlayerWorlds,
+  singlePlayerWorldMeta,
+};
 
+app.use(routes);
+
+// ─────────────────────────────────────────────────────────
+// REST: Single Player World management
+// ─────────────────────────────────────────────────────────
 // Attempt to load saved world state on startup
 (function bootstrapLoad() {
   try {
@@ -121,6 +143,9 @@ app.use(allRoutes);
       // Restore saved players snapshot
       savedPlayersByName = loaded.playersSnapshot || {};
 
+      // Restore single-player worlds
+      loadWorldsFromPersistence(loaded.singlePlayerWorlds, loaded.singlePlayerWorldMeta);
+
       // Keep globals in sync
       globals.serverMap = serverMap;
       globals.teams = teams;
@@ -136,7 +161,7 @@ app.use(allRoutes);
 
 // Periodic autosave
 setInterval(() => {
-  const ok = saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName });
+  const ok = saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName, singlePlayerWorlds, singlePlayerWorldMeta });
   if (ok) {
     console.log('[Persistence] Autosaved world state');
   }
@@ -146,7 +171,7 @@ setInterval(() => {
 ['SIGINT', 'SIGTERM'].forEach((sig) => {
   process.on(sig, () => {
     console.log(`[Persistence] Received ${sig}, saving world state...`);
-    try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+    try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName, singlePlayerWorlds, singlePlayerWorldMeta }); } catch {}
     process.exit(0);
   });
 });
@@ -170,6 +195,7 @@ function newConnection(socket) {
 
     console.log('New connection: ' + socket.id);
     try { logger.info('Client connected', { id: socket.id }); } catch {}
+    socket.singlePlayer = false; // Single-player mode flag per socket (set via client SET_MODE)
     io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
     io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
@@ -256,7 +282,7 @@ function newConnection(socket) {
       }
       players[data.id] = data;
 
-      socket.broadcast.emit('NEW_PLAYER', data);
+      broadcastOthers('NEW_PLAYER', data);
       try { logger.info('Player joined', { id: data.id, name: data.name }); } catch {}
 
       io.emit('NEW_CHAT_MESSAGE', {
@@ -327,14 +353,14 @@ function newConnection(socket) {
             teamId: p.teamId || null,
           };
           // Opportunistic save
-          try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+          try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName, singlePlayerWorlds, singlePlayerWorldMeta }); } catch {}
         }
       }
 
       players[socket.id] = [];
       delete players[socket.id];
 
-      io.emit('REMOVE_PLAYER', socket.id);
+      emitAll('REMOVE_PLAYER', socket.id);
     }
 
     socket.on('update_pos', update_pos);
@@ -403,8 +429,8 @@ function newConnection(socket) {
       playerData.teamId = teamId;
       playerData.color = 0; // Custom color, index 0 will be overridden by teamColor
 
-      io.emit('TEAM_CREATED', { teamId, team: teams[teamId] });
-      io.emit('TEAMS_UPDATE', { teams });
+      emitAll('TEAM_CREATED', { teamId, team: teams[teamId] });
+      emitAll('TEAMS_UPDATE', { teams });
       
       socket.emit('TEAM_JOINED', { teamId, team: teams[teamId] });
     });
@@ -459,7 +485,7 @@ function newConnection(socket) {
       team.members.push(playerId);
       playerData.teamId = teamId;
 
-      io.emit('TEAMS_UPDATE', { teams });
+      emitAll('TEAMS_UPDATE', { teams });
       io.to(playerId).emit('TEAM_JOINED', { teamId, team });
     });
 
@@ -506,7 +532,7 @@ function newConnection(socket) {
         delete teams[teamId];
       }
 
-      io.emit('TEAMS_UPDATE', { teams });
+      emitAll('TEAMS_UPDATE', { teams });
       socket.emit('TEAM_LEFT', { teamId });
     });
 
@@ -525,12 +551,65 @@ function newConnection(socket) {
       if (name) team.name = name;
       if (color) team.color = color;
 
-      io.emit('TEAMS_UPDATE', { teams });
+      emitAll('TEAMS_UPDATE', { teams });
     });
 
     socket.on('get_teams', () => {
       socket.emit('TEAMS_UPDATE', { teams });
     });
+
+    // Helper emit wrappers to scope broadcasts for single-player via Socket.io rooms
+    function emitAll(event, payload) {
+      if (socket.singlePlayer && socket.spRoomName) {
+        // SP mode: only emit to players in this world's room
+        io.to(socket.spRoomName).emit(event, payload);
+      } else {
+        // MP mode: emit to all globally
+        io.emit(event, payload);
+      }
+    }
+    function broadcastOthers(event, payload) {
+      if (socket.singlePlayer) return; // no-op in single player
+      socket.broadcast.emit(event, payload);
+    }
+
+    // Client can set mode prior to join
+    socket.on('SET_MODE', (data) => {
+      try {
+        socket.singlePlayer = !!(data && data.singlePlayer);
+        socket.browserId = (data && data.browserId) || socket.browserId || socket.id || 'anon';
+        const worldIdRaw = (data && data.worldId) || null;
+        
+        if (socket.singlePlayer) {
+          const { key, map } = ensureWorld(socket.browserId || 'anon', worldIdRaw || 'default');
+          socket.worldKey = key;
+          socket.worldMap = map;
+          
+          // Join Socket.io room for this single-player world
+          // Room name: sp_${browserId}_${worldId}
+          const roomName = `sp_${socket.browserId}_${worldIdRaw || 'default'}`;
+          socket.join(roomName);
+          socket.spRoomName = roomName;
+          
+          console.log('[SET_MODE] Socket joined SP world room:', { socketId: socket.id, room: roomName, worldKey: key });
+        } else {
+          // Leave any SP room
+          if (socket.spRoomName) {
+            socket.leave(socket.spRoomName);
+            console.log('[SET_MODE] Socket left SP room:', { socketId: socket.id, room: socket.spRoomName });
+          }
+          socket.worldKey = null;
+          socket.worldMap = null;
+          socket.spRoomName = null;
+          console.log('[SET_MODE] Socket set to multiplayer mode:', { socketId: socket.id });
+        }
+      } catch (e) {
+        console.error('[SET_MODE] Error:', e);
+      }
+    });
+
+    // Select correct map (single-player or main)
+    const getMap = () => (socket.singlePlayer && socket.worldMap) ? socket.worldMap : serverMap;
 
     socket.on('update_node', update_node);
 
@@ -538,7 +617,8 @@ function newConnection(socket) {
       let chunkPos = data.chunkPos.split(',');
       chunkPos[0] = parseInt(chunkPos[0]);
       chunkPos[1] = parseInt(chunkPos[1]);
-      let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
+      const map = getMap();
+      let chunk = map.getChunk(chunkPos[0], chunkPos[1]);
 
       if (data.amt > 0) {
         if (chunk.data[data.index] > 0) chunk.data[data.index] -= data.amt;
@@ -554,7 +634,7 @@ function newConnection(socket) {
         }
       }
 
-      io.emit('UPDATE_NODE', data);
+      emitAll('UPDATE_NODE', data);
     }
 
     socket.on('update_iron_node', update_iron_node);
@@ -563,7 +643,8 @@ function newConnection(socket) {
       let chunkPos = data.chunkPos.split(',');
       chunkPos[0] = parseInt(chunkPos[0]);
       chunkPos[1] = parseInt(chunkPos[1]);
-      let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
+      const map = getMap();
+      let chunk = map.getChunk(chunkPos[0], chunkPos[1]);
 
       if (data.amt > 0) {
         if (chunk.iron_data[data.index] > 0) chunk.iron_data[data.index] -= data.amt;
@@ -579,14 +660,15 @@ function newConnection(socket) {
         }
       }
 
-      io.emit('UPDATE_IRON_NODE', data);
+      emitAll('UPDATE_IRON_NODE', data);
     }
 
     socket.on('update_nodes', update_nodes);
 
     function update_nodes(data) {
       //console.log("update nodes", data);
-      let chunk = serverMap.getChunk(data.cx, data.cy);
+      const map = getMap();
+      let chunk = map.getChunk(data.cx, data.cy);
       let posX = Math.round(data.pos.x / TILESIZE);
       let posY = Math.round(data.pos.y / TILESIZE);
       posX = posX - data.cx * CHUNKSIZE;
@@ -614,35 +696,35 @@ function newConnection(socket) {
             let index;
             if (y < 0 && x >= 0 && x < CHUNKSIZE) {
               // top edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
+              tempChunk = map.getChunk(data.cx, data.cy - 1);
               index = x + 1 + y / CHUNKSIZE;
             } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
               // bottom edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
+              tempChunk = map.getChunk(data.cx, data.cy + 1);
               index = x + -1 + y / CHUNKSIZE;
             } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
               // left edge
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
+              tempChunk = map.getChunk(data.cx - 1, data.cy);
               index = x + CHUNKSIZE + y / CHUNKSIZE;
             } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
               // right edge
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
+              tempChunk = map.getChunk(data.cx + 1, data.cy);
               index = x - CHUNKSIZE + y / CHUNKSIZE;
             } else if (x < 0 && y < 0) {
               // top left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
+              tempChunk = map.getChunk(data.cx - 1, data.cy - 1);
               index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
             } else if (x >= CHUNKSIZE && y < 0) {
               // top right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
+              tempChunk = map.getChunk(data.cx + 1, data.cy - 1);
               index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
             } else if (x < 0 && y >= CHUNKSIZE) {
               // bottom left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
+              tempChunk = map.getChunk(data.cx - 1, data.cy + 1);
               index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
             } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
               // bottom right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
+              tempChunk = map.getChunk(data.cx + 1, data.cy + 1);
               index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
             }
             if (tempChunk != undefined) {
@@ -666,14 +748,15 @@ function newConnection(socket) {
         }
       }
 
-      io.emit('UPDATE_NODES', data);
+      emitAll('UPDATE_NODES', data);
     }
 
     socket.on('update_iron_nodes', update_iron_nodes);
 
     function update_iron_nodes(data) {
       //console.log("update nodes", data);
-      let chunk = serverMap.getChunk(data.cx, data.cy);
+      const map = getMap();
+      let chunk = map.getChunk(data.cx, data.cy);
       let posX = Math.round(data.pos.x / TILESIZE);
       let posY = Math.round(data.pos.y / TILESIZE);
       posX = posX - data.cx * CHUNKSIZE;
@@ -706,35 +789,35 @@ function newConnection(socket) {
             let index;
             if (y < 0 && x >= 0 && x < CHUNKSIZE) {
               // top edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
+              tempChunk = map.getChunk(data.cx, data.cy - 1);
               index = x + 1 + y / CHUNKSIZE;
             } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
               // bottom edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
+              tempChunk = map.getChunk(data.cx, data.cy + 1);
               index = x + -1 + y / CHUNKSIZE;
             } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
               // left edge
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
+              tempChunk = map.getChunk(data.cx - 1, data.cy);
               index = x + CHUNKSIZE + y / CHUNKSIZE;
             } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
               // right edge
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
+              tempChunk = map.getChunk(data.cx + 1, data.cy);
               index = x - CHUNKSIZE + y / CHUNKSIZE;
             } else if (x < 0 && y < 0) {
               // top left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
+              tempChunk = map.getChunk(data.cx - 1, data.cy - 1);
               index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
             } else if (x >= CHUNKSIZE && y < 0) {
               // top right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
+              tempChunk = map.getChunk(data.cx + 1, data.cy - 1);
               index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
             } else if (x < 0 && y >= CHUNKSIZE) {
               // bottom left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
+              tempChunk = map.getChunk(data.cx - 1, data.cy + 1);
               index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
             } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
               // bottom right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
+              tempChunk = map.getChunk(data.cx + 1, data.cy + 1);
               index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
             }
             if (tempChunk != undefined) {
@@ -780,39 +863,41 @@ function newConnection(socket) {
         itemBag.invBlock.items['Raw Metal'] = {};
         itemBag.invBlock.items['Raw Metal'].amount = Math.round(reward * 0.2) + 1;
         chunk.objects.push(itemBag);
-        io.emit('NEW_OBJECT', {
+        emitAll('NEW_OBJECT', {
           cx: chunk.cx,
           cy: chunk.cy,
           obj: itemBag,
         });
       }
-      io.emit('UPDATE_IRON_NODES', data);
+      emitAll('UPDATE_IRON_NODES', data);
     }
 
     socket.on('new_object', new_object);
 
     function new_object(data) {
-      let chunk = serverMap.getChunk(data.cx, data.cy);
+      const map = getMap();
+      let chunk = map.getChunk(data.cx, data.cy);
       chunk.objects.push(data.obj);
 
-      socket.broadcast.emit('NEW_OBJECT', data);
+      broadcastOthers('NEW_OBJECT', data);
     }
 
     socket.on('delete_obj', delete_obj);
 
     function delete_obj(data) {
       //console.log(data);
-      let chunk = serverMap.getChunk(data.cx, data.cy);
+      const map = getMap();
+      let chunk = map.getChunk(data.cx, data.cy);
       for (let i = chunk.objects.length - 1; i >= 0; i--) {
         if (data.objName == 'ExpOrb') {
           if (data.z == chunk.objects[i].z && data.id == chunk.objects[i].id) {
-            io.emit('DELETE_OBJ', data);
+            emitAll('DELETE_OBJ', data);
             chunk.objects.splice(i, 1);
             spawnItemBag(chunk, data);
           }
         } else if (data.brainID != undefined) {
           if (data.z == chunk.objects[i].z && data.brainID == chunk.objects[i].brainID) {
-            io.emit('DELETE_OBJ', data);
+            emitAll('DELETE_OBJ', data);
             chunk.objects.splice(i, 1);
             spawnItemBag(chunk, data);
           }
@@ -823,7 +908,7 @@ function newConnection(socket) {
             data.z == chunk.objects[i].z &&
             data.objName == chunk.objects[i].objName
           ) {
-            io.emit('DELETE_OBJ', data);
+            emitAll('DELETE_OBJ', data);
             chunk.objects.splice(i, 1);
             spawnItemBag(chunk, data);
           }
@@ -866,7 +951,7 @@ function newConnection(socket) {
             }
           }
           chunk.objects.push(itemBag);
-          io.emit('NEW_OBJECT', {
+          emitAll('NEW_OBJECT', {
             cx: chunk.cx,
             cy: chunk.cy,
             obj: itemBag,
@@ -880,14 +965,15 @@ function newConnection(socket) {
     socket.on('update_obj', update_obj);
 
     function update_obj(data) {
-      let chunk = serverMap.getChunk(data.cx, data.cy);
+      const map = getMap();
+      let chunk = map.getChunk(data.cx, data.cy);
       for (let i = chunk.objects.length - 1; i >= 0; i--) {
         if (data.objName == 'ExpOrb') {
           if (data.z == chunk.objects[i].z && data.id == chunk.objects[i].id) {
             chunk.objects[i][data.update_name] = data.update_value;
             chunk.objects[i].pos.x = data.pos.x;
             chunk.objects[i].pos.y = data.pos.y;
-            socket.broadcast.emit('UPDATE_OBJ', data);
+            broadcastOthers('UPDATE_OBJ', data);
           }
         } else if (data.brainID != undefined) {
           //console.log(data);
@@ -905,7 +991,7 @@ function newConnection(socket) {
             data.objName == chunk.objects[i].objName
           ) {
             chunk.objects[i][data.update_name] = data.update_value;
-            socket.broadcast.emit('UPDATE_OBJ', data);
+            broadcastOthers('UPDATE_OBJ', data);
           }
         }
       }
@@ -925,7 +1011,8 @@ function newConnection(socket) {
     }
 
     function update_inv(data) {
-      const chunk = serverMap.getChunk(data.cx, data.cy);
+      const map = getMap();
+      const chunk = map.getChunk(data.cx, data.cy);
       if (!chunk || !Array.isArray(chunk.objects)) return;
 
       for (let i = chunk.objects.length - 1; i >= 0; i--) {
@@ -955,7 +1042,7 @@ function newConnection(socket) {
             invId: obj.invBlock.invId,
             items: obj.invBlock.items,
           };
-          io.emit('UPDATE_INV', payload); // send to everyone, including sender
+          emitAll('UPDATE_INV', payload); // scoped emit (single-player stays private)
           break;
         }
       }
@@ -965,15 +1052,17 @@ function newConnection(socket) {
 
     function new_projectile(data) {
       //add projectiles to server map
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+      const map = getMap();
+      let chunk = map.getChunk(data.cPos.x, data.cPos.y);
       chunk.projectiles.push(data);
-      socket.broadcast.emit('NEW_PROJECTILE', data);
+      broadcastOthers('NEW_PROJECTILE', data);
     }
 
     socket.on('delete_proj', delete_projectile);
 
     function delete_projectile(data) {
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+      const map = getMap();
+      let chunk = map.getChunk(data.cPos.x, data.cPos.y);
       for (let i = chunk.projectiles.length - 1; i >= 0; i--) {
         if (
           data.id == chunk.projectiles[i].id &&
@@ -981,7 +1070,7 @@ function newConnection(socket) {
           data.name == chunk.projectiles[i].name &&
           data.ownerName == chunk.projectiles[i].ownerName
         ) {
-          socket.broadcast.emit('DELETE_PROJ', data);
+          broadcastOthers('DELETE_PROJ', data);
           chunk.projectiles.splice(i, 1);
         }
       }
@@ -991,15 +1080,17 @@ function newConnection(socket) {
 
     function new_sound(data) {
       //add sounds to server map
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+      const map = getMap();
+      let chunk = map.getChunk(data.cPos.x, data.cPos.y);
       chunk.soundObjs.push(data);
-      socket.broadcast.emit('NEW_SOUND', data);
+      broadcastOthers('NEW_SOUND', data);
     }
 
     socket.on('delete_sound', delete_sound);
 
     function delete_sound(data) {
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+      const map = getMap();
+      let chunk = map.getChunk(data.cPos.x, data.cPos.y);
       for (let i = chunk.soundObjs.length - 1; i >= 0; i--) {
         if (
           data.id == chunk.soundObjs[i].id &&
@@ -1015,16 +1106,17 @@ function newConnection(socket) {
     socket.on('wander_request', wander_request);
 
     function wander_request(data) {
-      for (let i = 0; i < serverMap.brains.length; i++) {
-        if (data.id == serverMap.brains[i].id) {
+      const map = getMap();
+      for (let i = 0; i < map.brains.length; i++) {
+        if (data.id == map.brains[i].id) {
           let angle = Math.random() * 2 * Math.PI;
           let target = {
             x: data.pos.x + Math.cos(angle) * 100,
             y: data.pos.y + Math.sin(angle) * 100,
           };
 
-          io.emit('WANDER_TARGET', { id: data.id, target: target });
-          serverMap.brains[i].target = target;
+          emitAll('WANDER_TARGET', { id: data.id, target: target });
+          map.brains[i].target = target;
 
           i = serverMap.brains.length;
         }
@@ -1037,7 +1129,8 @@ function newConnection(socket) {
       let pos = data.split(',');
       pos[0] = parseInt(pos[0]);
       pos[1] = parseInt(pos[1]);
-      let chunk = serverMap.getChunk(pos[0], pos[1]);
+      const map = getMap();
+      let chunk = map.getChunk(pos[0], pos[1]);
       let tempData = {};
       for (let x = 0; x < CHUNKSIZE; x++) {
         for (let y = 0; y < CHUNKSIZE; y++) {
@@ -1058,16 +1151,20 @@ function newConnection(socket) {
         objects: chunk.objects,
         projectiles: chunk.projectiles,
       });
+      if (socket.singlePlayer) {
+        console.log('[get_chunk] SP chunk sent:', { socketId: socket.id, pos: [pos[0], pos[1]], worldKey: socket.worldKey });
+      }
     }
 
     socket.on('get_portals', get_portals);
 
     function get_portals(data) {
+      const map = getMap();
       let portals = [];
       for (let y = data.cPos.y - 5; y <= data.cPos.y + 5; y++) {
         for (let x = data.cPos.x - 5; x <= data.cPos.x + 5; x++) {
-          if (serverMap.chunks['' + x + ',' + y] != undefined) {
-            let chunk = serverMap.chunks['' + x + ',' + y];
+          if (map.chunks['' + x + ',' + y] != undefined) {
+            let chunk = map.chunks['' + x + ',' + y];
             for (let i = 0; i < chunk.objects.length; i++) {
               if (chunk.objects[i].objName == 'Portal') {
                 portals.push({

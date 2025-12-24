@@ -1,13 +1,19 @@
 const fs = require('fs');
 const path = require('path');
 
-const SAVE_PATH = path.join(__dirname, '..', 'data', 'world.json');
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const SAVE_PATH = path.join(DATA_DIR, 'world.json');
+const WORLDS_DIR = path.join(DATA_DIR, 'worlds');
 
-function ensureDir() {
-  const dir = path.dirname(SAVE_PATH);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+function ensureDir(dirPath = DATA_DIR) {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
   }
+}
+
+function getWorldPath(browserId, worldId) {
+  // Path: data/worlds/${browserId}/${worldId}.json
+  return path.join(WORLDS_DIR, String(browserId), `${worldId}.json`);
 }
 
 function serializeServerMap(serverMap) {
@@ -60,9 +66,63 @@ function serializePlayersSnapshot(players) {
   return out;
 }
 
-function saveState({ players, serverMap, chatMessages, teams, playersSnapshot }) {
+// Save a single SP world to its own file
+function saveWorldFile(browserId, worldId, worldMap) {
+  try {
+    ensureDir(WORLDS_DIR);
+    const browserDir = path.join(WORLDS_DIR, String(browserId));
+    ensureDir(browserDir);
+    
+    const worldPath = getWorldPath(browserId, worldId);
+    const payload = {
+      browserId,
+      worldId,
+      savedAt: Date.now(),
+      map: serializeServerMap(worldMap),
+    };
+    fs.writeFileSync(worldPath, JSON.stringify(payload));
+    console.log('[Persistence] Saved SP world:', { browserId, worldId, path: worldPath });
+    return true;
+  } catch (e) {
+    console.error('[Persistence] Error saving SP world file:', { browserId, worldId, error: String(e) });
+    return false;
+  }
+}
+
+// Load a single SP world from its file
+function loadWorldFile(browserId, worldId) {
+  try {
+    const worldPath = getWorldPath(browserId, worldId);
+    if (!fs.existsSync(worldPath)) return null;
+    const raw = fs.readFileSync(worldPath, 'utf-8');
+    const payload = JSON.parse(raw);
+    console.log('[Persistence] Loaded SP world:', { browserId, worldId });
+    return payload.map;
+  } catch (e) {
+    console.error('[Persistence] Error loading SP world file:', { browserId, worldId, error: String(e) });
+    return null;
+  }
+}
+
+// Delete a SP world file
+function deleteWorldFile(browserId, worldId) {
+  try {
+    const worldPath = getWorldPath(browserId, worldId);
+    if (fs.existsSync(worldPath)) {
+      fs.rmSync(worldPath, { force: true });
+      console.log('[Persistence] Deleted SP world:', { browserId, worldId });
+    }
+    return true;
+  } catch (e) {
+    console.error('[Persistence] Error deleting SP world file:', { browserId, worldId, error: String(e) });
+    return false;
+  }
+}
+
+function saveState({ players, serverMap, chatMessages, teams, playersSnapshot, singlePlayerWorlds, singlePlayerWorldMeta }) {
   try {
     ensureDir();
+    // Save main server state (MP world only, no SP worlds in here)
     const payload = {
       savedAt: Date.now(),
       playersSnapshot: playersSnapshot || serializePlayersSnapshot(players),
@@ -71,6 +131,17 @@ function saveState({ players, serverMap, chatMessages, teams, playersSnapshot })
       teams: teams || {},
     };
     fs.writeFileSync(SAVE_PATH, JSON.stringify(payload));
+    
+    // Also save each SP world to its own file
+    const spWorldIds = Object.keys(singlePlayerWorlds || {});
+    for (let i = 0; i < spWorldIds.length; i++) {
+      const key = spWorldIds[i];
+      const [browserId, worldId] = key.split(':');
+      if (browserId && worldId && singlePlayerWorlds[key]) {
+        saveWorldFile(browserId, worldId, singlePlayerWorlds[key]);
+      }
+    }
+    
     return true;
   } catch (e) {
     console.error('Error saving world state:', e);
@@ -90,4 +161,4 @@ function loadState() {
   }
 }
 
-module.exports = { saveState, loadState };
+module.exports = { saveState, loadState, saveWorldFile, loadWorldFile, deleteWorldFile, getWorldPath };
