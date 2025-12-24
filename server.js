@@ -11,8 +11,21 @@ var kills_deaths = {};
 
 const dotenv = require('dotenv');
 dotenv.config();
-let countdown = process.env.SERVER_TIME || 60 * 60 * 24 * 10000;
-console.log(countdown, 'COUNT');
+
+// Timer/Restart configuration
+const SERVER_TIME_ENV = process.env.SERVER_TIME;
+// Disable timer if missing/empty or explicitly set to "NO TIME"
+const TIMER_DISABLED = !SERVER_TIME_ENV || (typeof SERVER_TIME_ENV === 'string' && SERVER_TIME_ENV.toUpperCase() === 'NO TIME');
+const RESTART_ON_TIMER = (process.env.RESTART_ON_TIMER || 'true').toLowerCase() === 'true';
+
+let countdown;
+if (TIMER_DISABLED) {
+  countdown = 0;
+} else {
+  const parsed = Number(SERVER_TIME_ENV);
+  countdown = Number.isFinite(parsed) && parsed > 0 ? parsed : 60 * 60 * 24 * 10000; // default very long
+}
+console.log(TIMER_DISABLED ? 'Timer disabled' : `COUNT: ${countdown}`);
 const allRoutes = require('./api/routes/Routes');
 const port = process.env.PORT || 3000;
 const app = express();
@@ -69,14 +82,17 @@ function newConnection(socket) {
       return;
     }
 
-    const minutes = Math.floor(countdown / 60);
-    const seconds = countdown % 60;
     console.log('New connection: ' + socket.id);
-
     io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
     io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
-    io.to(socket.id).emit('sync_time', { minutes, seconds });
+    if (TIMER_DISABLED) {
+      io.to(socket.id).emit('sync_time', { disabled: true });
+    } else {
+      const minutes = Math.floor(countdown / 60);
+      const seconds = countdown % 60;
+      io.to(socket.id).emit('sync_time', { minutes, seconds, totalSeconds: countdown });
+    }
 
     socket.on('new_player', new_player);
     function new_player(data) {
@@ -879,6 +895,10 @@ function newConnection(socket) {
 
 let resetCalled = false;
 setInterval(() => {
+  // If timer is disabled, skip time-related broadcasting entirely
+  if (TIMER_DISABLED) {
+    return;
+  }
   // Broadcast every minute
   if (countdown % 30 === 0 || countdown <= 15 / 2) {
     //console.log("heal plants");
@@ -928,19 +948,24 @@ setInterval(() => {
   if (countdown <= 0) {
     if (!resetCalled) {
       io.emit('server_ended');
-      resetCalled = false;
+      resetCalled = true;
 
-      countdown = 15 * 60;
+      // Start a fresh map and reset round timer if applicable
       serverMap = new Map(Math.random());
+      countdown = 15 * 60;
 
-      exec('pm2 restart holes-server', (err, stdout, stderr) => {
-        if (err) {
-          console.error(`Restart error: ${err.message}`);
-          return;
-        }
-        console.log(`Server restart stdout: ${stdout}`);
-        console.error(`Server restart stderr: ${stderr}`);
-      });
+      if (RESTART_ON_TIMER) {
+        exec('pm2 restart holes-server', (err, stdout, stderr) => {
+          if (err) {
+            console.error(`Restart error: ${err.message}`);
+            return;
+          }
+          console.log(`Server restart stdout: ${stdout}`);
+          if (stderr) console.error(`Server restart stderr: ${stderr}`);
+        });
+      } else {
+        console.log('Timer ended — restart suppressed by RESTART_ON_TIMER=false');
+      }
     }
   } else {
     countdown--;
