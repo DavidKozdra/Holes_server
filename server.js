@@ -9,6 +9,8 @@ const { exec } = require('child_process');
 const globals = getGlobals(); // Now it correctly retrieves global variables
 let { players, serverMap, chatMessages, teams } = globals;
 var kills_deaths = {};
+// Persisted player snapshots keyed by name
+let savedPlayersByName = {};
 
 const dotenv = require('dotenv');
 dotenv.config();
@@ -93,6 +95,8 @@ app.use(allRoutes);
 
       // Restore teams if present
       teams = loaded.teams || teams;
+      // Restore saved players snapshot
+      savedPlayersByName = loaded.playersSnapshot || {};
 
       // Keep globals in sync
       globals.serverMap = serverMap;
@@ -109,7 +113,7 @@ app.use(allRoutes);
 
 // Periodic autosave
 setInterval(() => {
-  const ok = saveState({ players, serverMap, chatMessages, teams });
+  const ok = saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName });
   if (ok) {
     console.log('[Persistence] Autosaved world state');
   }
@@ -119,7 +123,7 @@ setInterval(() => {
 ['SIGINT', 'SIGTERM'].forEach((sig) => {
   process.on(sig, () => {
     console.log(`[Persistence] Received ${sig}, saving world state...`);
-    try { saveState({ players, serverMap, chatMessages, teams }); } catch {}
+    try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
     process.exit(0);
   });
 });
@@ -194,6 +198,38 @@ function newConnection(socket) {
       data.name = name;
       data.kills = 0;
       data.deaths = 0;
+      // Restore prior snapshot by name (inventory/statBlock/pos/teamId)
+      const snap = savedPlayersByName[name];
+      if (snap) {
+        try {
+          if (snap.invBlock) {
+            data.invBlock = data.invBlock || { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: { head: "", neck: "", chest: "", legs: "", feet: "" } };
+            data.invBlock.items = snap.invBlock.items || {};
+            data.invBlock.hotbar = Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar : data.invBlock.hotbar;
+            if (typeof snap.invBlock.selectedHotBar === 'number') data.invBlock.selectedHotBar = snap.invBlock.selectedHotBar;
+            data.invBlock.equiped = snap.invBlock.equiped || data.invBlock.equiped;
+          }
+          if (snap.statBlock) {
+            data.statBlock = snap.statBlock;
+          }
+          if (snap.pos && snap.pos.x != null && snap.pos.y != null) {
+            data.pos = snap.pos;
+          }
+          if (snap.teamId) {
+            data.teamId = snap.teamId;
+          }
+          // Send snapshot to joining client so it can apply inventory client-side
+          io.to(socket.id).emit('PLAYER_SNAPSHOT', {
+            name,
+            invBlock: snap.invBlock || null,
+            statBlock: snap.statBlock || null,
+            pos: snap.pos || null,
+            teamId: snap.teamId || null,
+          });
+        } catch (e) {
+          console.warn('[Persistence] Failed to apply player snapshot for', name, e);
+        }
+      }
       players[data.id] = data;
 
       socket.broadcast.emit('NEW_PLAYER', data);
@@ -245,6 +281,28 @@ function newConnection(socket) {
           kills: players[socket.id].kills,
           deaths: players[socket.id].deaths,
         };
+        // Save snapshot by player name before removal
+        const p = players[socket.id];
+        if (p && p.name) {
+          savedPlayersByName[p.name] = {
+            name: p.name,
+            pos: p.pos || { x: 0, y: 0 },
+            race: p.race || null,
+            color: p.color || 0,
+            statBlock: p.statBlock || null,
+            invBlock: p.invBlock
+              ? {
+                  items: p.invBlock.items || {},
+                  hotbar: p.invBlock.hotbar || ["","","","",""],
+                  selectedHotBar: typeof p.invBlock.selectedHotBar === 'number' ? p.invBlock.selectedHotBar : 0,
+                  equiped: p.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" },
+                }
+              : null,
+            teamId: p.teamId || null,
+          };
+          // Opportunistic save
+          try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        }
       }
 
       players[socket.id] = [];
@@ -1257,7 +1315,8 @@ function ensureItemBagSchema(bag) {
 }
 
 function mergeAllChunkBags() {
-  const MERGE_DISTANCE = 120;
+  // Only merge when bags are extremely close (about 1.5 tiles)
+  const MERGE_DISTANCE = TILESIZE * 1.5;
 
   for (const key in serverMap.chunks) {
     const chunk = serverMap.chunks[key];

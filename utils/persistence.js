@@ -34,12 +34,38 @@ function serializeServerMap(serverMap) {
   };
 }
 
-function saveState({ players, serverMap, chatMessages, teams }) {
+function serializePlayersSnapshot(players) {
+  const out = {};
+  const ids = Object.keys(players || {});
+  for (let i = 0; i < ids.length; i++) {
+    const p = players[ids[i]];
+    if (!p || !p.name) continue;
+    out[p.name] = {
+      name: p.name,
+      pos: p.pos || { x: 0, y: 0 },
+      race: p.race || null,
+      color: p.color || 0,
+      statBlock: p.statBlock || null,
+      invBlock: p.invBlock
+        ? {
+            items: p.invBlock.items || {},
+            hotbar: p.invBlock.hotbar || ["","","","",""],
+            selectedHotBar: typeof p.invBlock.selectedHotBar === 'number' ? p.invBlock.selectedHotBar : 0,
+            equiped: p.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" },
+          }
+        : null,
+      teamId: p.teamId || null,
+    };
+  }
+  return out;
+}
+
+function saveState({ players, serverMap, chatMessages, teams, playersSnapshot }) {
   try {
     ensureDir();
     const payload = {
       savedAt: Date.now(),
-      playersSnapshot: {}, // players are volatile; keeping minimal snapshot
+      playersSnapshot: playersSnapshot || serializePlayersSnapshot(players),
       serverMap: serializeServerMap(serverMap),
       chatMessages: chatMessages || [],
       teams: teams || {},
