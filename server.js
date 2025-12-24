@@ -552,6 +552,7 @@ function newConnection(socket) {
     });
 
     socket.on('update_node', update_node);
+    socket.on('ai_dig_log', ai_dig_log);
 
     function update_node(data) {
       let chunkPos = data.chunkPos.split(',');
@@ -574,6 +575,10 @@ function newConnection(socket) {
       }
 
       io.emit('UPDATE_NODE', data);
+    }
+
+    function ai_dig_log(data) {
+      console.log(`[AI DIG] ${data.id} chunk ${data.chunk} idx ${data.index} amt ${Number(data.amount).toFixed(3)} mode=${data.mode || ''}`);
     }
 
     socket.on('update_iron_node', update_iron_node);

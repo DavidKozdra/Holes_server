@@ -1,5 +1,6 @@
 // aiSystem.js - Server-side AI entity spawning and management
 const { getGlobals } = require('../globals');
+const { CHUNKSIZE, TILESIZE } = require('./map');
 
 let globals = getGlobals();
 
@@ -45,11 +46,13 @@ class AISpawningSystem {
     }
 
     spawnInitialTestEntities() {
-        // Spawn Gnome at (0, 0)
-        this.spawnAIEntityAtPosition(0, 100, 0, 1); // race 0 = gnome
-        
-        // Spawn Skizzard at (0, 0)
-        this.spawnAIEntityAtPosition(100, 100, 2, 1); // race 2 = skizzard
+        const anchor = { pos: { x: 0, y: 0 } };
+        const first = this.findValidSpawnNear(anchor) || { x: 0, y: 0 };
+        const second = this.findValidSpawnNear(anchor) || { x: 150, y: 150 };
+
+        // Spawn Gnome and Skizzard near origin but in breathable tiles
+        this.spawnAIEntityAtPosition(first.x, first.y, 0, 1); // race 0 = gnome
+        this.spawnAIEntityAtPosition(second.x, second.y, 2, 1); // race 2 = skizzard
         
         console.log('[AI] Spawned initial test entities at (0,0)');
     }
@@ -116,19 +119,20 @@ class AISpawningSystem {
         // Pick a random player to spawn near
         let targetPlayer = playerArray[Math.floor(Math.random() * playerArray.length)];
         
-        // Spawn away from player (1500-3000 pixels)
-        let distance = 1500 + Math.random() * 1500;
-        let angle = Math.random() * Math.PI * 2;
-        let spawnX = targetPlayer.pos.x + Math.cos(angle) * distance;
-        let spawnY = targetPlayer.pos.y + Math.sin(angle) * distance;
+        // Pick a breathable tile near the player so clients already tracking that area can simulate AI
+        const spawnPos = this.findValidSpawnNear(targetPlayer);
+        if (!spawnPos) {
+            console.warn('[AI] Failed to find valid spawn tile near player, skipping spawn');
+            return;
+        }
         
         // Randomly choose Gnome or Skizzard
         let race = Math.random() < 0.5 ? 0 : 2; // 0 = gnome, 2 = skizzard
         let level = this.calculateAILevel();
         
-        console.log(`[AI] Spawning ${race === 0 ? 'Gnome' : 'Skizzard'} level ${level} at (${Math.floor(spawnX)}, ${Math.floor(spawnY)})`);
+        console.log(`[AI] Spawning ${race === 0 ? 'Gnome' : 'Skizzard'} level ${level} at (${Math.floor(spawnPos.x)}, ${Math.floor(spawnPos.y)})`);
         
-        this.spawnAIEntityAtPosition(spawnX, spawnY, race, level);
+        this.spawnAIEntityAtPosition(spawnPos.x, spawnPos.y, race, level);
         
         this.lastSpawnTime = Date.now();
     }
@@ -170,6 +174,69 @@ class AISpawningSystem {
             delete this.aiEntities[id];
             this.io.emit('REMOVE_AI_ENTITY', id);
         }
+    }
+
+    findValidSpawnNear(targetPlayer) {
+        const { serverMap } = getGlobals();
+        const minDist = 600; // stay off-screen but within loaded chunk radius
+        const maxDist = 1100;
+        const attempts = 28;
+
+        for (let i = 0; i < attempts; i++) {
+            const distance = minDist + Math.random() * (maxDist - minDist);
+            const angle = Math.random() * Math.PI * 2;
+            const spawnX = targetPlayer.pos.x + Math.cos(angle) * distance;
+            const spawnY = targetPlayer.pos.y + Math.sin(angle) * distance;
+
+            const chunkX = Math.floor(spawnX / (TILESIZE * CHUNKSIZE));
+            const chunkY = Math.floor(spawnY / (TILESIZE * CHUNKSIZE));
+            const chunk = serverMap.getChunk(chunkX, chunkY);
+            const tileX = Math.floor(spawnX / TILESIZE) - chunkX * CHUNKSIZE;
+            const tileY = Math.floor(spawnY / TILESIZE) - chunkY * CHUNKSIZE;
+
+            if (tileX < 0 || tileX >= CHUNKSIZE || tileY < 0 || tileY >= CHUNKSIZE) continue;
+
+            const tileIdx = tileX + tileY * CHUNKSIZE;
+            const density = chunk.data[tileIdx];
+
+            // If the initial tile is blocked, look for the closest breathable spot nearby
+            let targetTile = null;
+            if (density < 0.35) {
+                targetTile = { x: tileX, y: tileY };
+            } else {
+                const nearby = this.findNearbyOpenTile(chunk, tileX, tileY, 8);
+                if (nearby) targetTile = nearby;
+            }
+
+            if (targetTile) {
+                return {
+                    x: (chunkX * CHUNKSIZE + targetTile.x + 0.5) * TILESIZE,
+                    y: (chunkY * CHUNKSIZE + targetTile.y + 0.5) * TILESIZE
+                };
+            }
+        }
+
+        return null;
+    }
+
+    findNearbyOpenTile(chunk, tileX, tileY, radius = 6) {
+        let best = null;
+        for (let dx = -radius; dx <= radius; dx++) {
+            for (let dy = -radius; dy <= radius; dy++) {
+                const nx = tileX + dx;
+                const ny = tileY + dy;
+                if (nx < 0 || nx >= CHUNKSIZE || ny < 0 || ny >= CHUNKSIZE) continue;
+
+                const val = chunk.data[nx + ny * CHUNKSIZE];
+                if (val < 0.35) {
+                    const manhattan = Math.abs(dx) + Math.abs(dy);
+                    if (!best || manhattan < best.dist) {
+                        best = { x: nx, y: ny, dist: manhattan };
+                    }
+                }
+            }
+        }
+        return best;
     }
 }
 
