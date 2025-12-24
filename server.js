@@ -4,6 +4,8 @@ const cors = require('cors');
 const { validColors } = require('./utils/color');
 const { Map, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
 const { saveState, loadState } = require('./utils/persistence');
+const { logger, DATA_DIR } = require('./utils/logger');
+const fs = require('fs');
 const { getGlobals } = require('./globals'); // Ensure correct import
 const { exec } = require('child_process');
 const globals = getGlobals(); // Now it correctly retrieves global variables
@@ -14,6 +16,26 @@ let savedPlayersByName = {};
 
 const dotenv = require('dotenv');
 dotenv.config();
+
+// CLI utilities: allow clearing data via --delete
+(function cliUtils(){
+  try {
+    const args = process.argv.slice(2);
+    if (args.includes('--delete')) {
+      const target = DATA_DIR;
+      try {
+        fs.rmSync(target, { recursive: true, force: true });
+        console.log(`[CLI] Cleared data directory: ${target}`);
+        logger.info('CLI delete executed', { dir: target });
+      } catch (e) {
+        console.error('[CLI] Failed to clear data directory', e);
+        logger.error('CLI delete failed', { error: String(e) });
+        process.exitCode = 1;
+      }
+      process.exit(0);
+    }
+  } catch {}
+})();
 
 // Timer/Restart configuration
 const SERVER_TIME_ENV = process.env.SERVER_TIME;
@@ -54,6 +76,7 @@ const path = require('path');
 app.use(express.static(path.join(__dirname, '../Holes_Client')));
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Server is running on http://localhost:${port}`);
+  try { logger.info('Server started', { port }); } catch {}
 });
 
 // Configure Socket.io with CORS
@@ -146,6 +169,7 @@ function newConnection(socket) {
     }
 
     console.log('New connection: ' + socket.id);
+    try { logger.info('Client connected', { id: socket.id }); } catch {}
     io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
     io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
@@ -233,6 +257,7 @@ function newConnection(socket) {
       players[data.id] = data;
 
       socket.broadcast.emit('NEW_PLAYER', data);
+      try { logger.info('Player joined', { id: data.id, name: data.name }); } catch {}
 
       io.emit('NEW_CHAT_MESSAGE', {
         message: `${ServerWelcomeMessage} ${data.name}`,
@@ -263,6 +288,7 @@ function newConnection(socket) {
     socket.on('disconnect', disconnect);
 
     function disconnect(data) {
+      try { logger.info('Client disconnected', { id: socket.id }); } catch {}
       console.log(socket.id + ' disconnected');
       if (players[socket.id] != undefined) {
         console.log(
