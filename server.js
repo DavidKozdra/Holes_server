@@ -576,17 +576,50 @@ function newConnection(socket) {
 
     socket.on('update_inv', update_inv);
 
+    function sanitizeItems(items) {
+      const cleaned = {};
+      if (!items || typeof items !== 'object') return cleaned;
+      for (const k of Object.keys(items)) {
+        const v = items[k];
+        const amt = v && typeof v.amount === 'number' ? v.amount : Number(v?.amount);
+        if (Number.isFinite(amt) && amt > 0) cleaned[k] = { amount: Math.floor(amt) };
+      }
+      return cleaned;
+    }
+
     function update_inv(data) {
-      let chunk = serverMap.getChunk(data.cx, data.cy);
+      const chunk = serverMap.getChunk(data.cx, data.cy);
+      if (!chunk || !Array.isArray(chunk.objects)) return;
+
       for (let i = chunk.objects.length - 1; i >= 0; i--) {
-        if (
-          data.pos.x == chunk.objects[i].pos.x &&
-          data.pos.y == chunk.objects[i].pos.y &&
-          data.z == chunk.objects[i].z &&
-          data.objName == chunk.objects[i].objName
-        ) {
-          chunk.objects[i].invBlock.items = data.items;
-          socket.broadcast.emit('UPDATE_INV', data);
+        const obj = chunk.objects[i];
+        const idMatch =
+          obj.invBlock && data.invId !== undefined && obj.invBlock.invId === data.invId;
+        const posMatch =
+          data.pos.x === obj.pos.x &&
+          data.pos.y === obj.pos.y &&
+          data.z === obj.z &&
+          data.objName === obj.objName;
+
+        const hasInventory = obj && (obj.invBlock || obj.objName === 'Chest' || obj.objName === 'ItemBag');
+
+        if (hasInventory && (idMatch || posMatch)) {
+          obj.invBlock = obj.invBlock || { items: {} };
+          obj.invBlock.items = sanitizeItems(data.items);
+          if (typeof obj.invBlock.invId !== 'number' && typeof data.invId === 'number') {
+            obj.invBlock.invId = data.invId;
+          }
+          const payload = {
+            cx: data.cx,
+            cy: data.cy,
+            objName: data.objName,
+            pos: data.pos,
+            z: data.z,
+            invId: obj.invBlock.invId,
+            items: obj.invBlock.items,
+          };
+          io.emit('UPDATE_INV', payload); // send to everyone, including sender
+          break;
         }
       }
     }
@@ -891,6 +924,7 @@ setInterval(() => {
 
 function ensureItemBagSchema(bag) {
   if (!bag) return null;
+  if (bag.objName !== 'ItemBag') return null; // Only normalize loot bags
   // It must be an inventory object with a position
   if (bag.type !== 'InvObj') bag.type = 'InvObj';
   if (!bag.objName) bag.objName = 'ItemBag';
@@ -924,7 +958,7 @@ function ensureItemBagSchema(bag) {
 }
 
 function mergeAllChunkBags() {
-  const MERGE_DISTANCE = 200;
+  const MERGE_DISTANCE = 120;
 
   for (const key in serverMap.chunks) {
     const chunk = serverMap.chunks[key];
@@ -947,7 +981,7 @@ function mergeAllChunkBags() {
 
       for (let i = 0; i < chunk.objects.length; i++) {
         let bagA = chunk.objects[i];
-        if (!bagA || bagA.type !== 'InvObj') continue;
+        if (!bagA || bagA.type !== 'InvObj' || bagA.objName !== 'ItemBag') continue;
 
         bagA = ensureItemBagSchema(bagA);
         if (!bagA) {
@@ -967,7 +1001,7 @@ function mergeAllChunkBags() {
 
         for (let j = i + 1; j < chunk.objects.length; j++) {
           let bagB = chunk.objects[j];
-          if (!bagB || bagB.type !== 'InvObj') continue;
+          if (!bagB || bagB.type !== 'InvObj' || bagB.objName !== 'ItemBag') continue;
 
           bagB = ensureItemBagSchema(bagB);
           if (!bagB) {
