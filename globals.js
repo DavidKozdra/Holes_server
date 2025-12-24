@@ -13,11 +13,15 @@ let chatMessages = [
 ];
 let serverStartTime = Date.now(); // Capture startup timestamp in milliseconds
 
+// Team system
+let teams = {}; // { teamId: { name, color, creator, members: [], requests: [] } }
+let nextTeamId = 1;
+
 function getGlobals() {
   // needs to request to the server no ?
   // might send too much text maybe filtering the last chats 
   // this should be more functional ...
-  return { players, traps, serverMap, chatMessages, serverStartTime };
+  return { players, traps, serverMap, chatMessages, serverStartTime, teams };
 }
 
 // Ensure correct export

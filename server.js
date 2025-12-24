@@ -6,7 +6,7 @@ const { Map, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
 const { getGlobals } = require('./globals'); // Ensure correct import
 const { exec } = require('child_process');
 const globals = getGlobals(); // Now it correctly retrieves global variables
-let { players, serverMap, chatMessages } = globals;
+let { players, serverMap, chatMessages, teams } = globals;
 var kills_deaths = {};
 
 const dotenv = require('dotenv');
@@ -235,6 +235,159 @@ function newConnection(socket) {
       // Broadcast the updated value to other clients
       socket.broadcast.emit('UPDATE_PLAYER', data);
     }
+
+    // Team management handlers
+    socket.on('create_team', (data) => {
+      const { name, color } = data;
+      const playerData = players[socket.id];
+      
+      if (!playerData) return;
+
+      // Generate unique team ID
+      const teamId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      
+      teams[teamId] = {
+        id: teamId,
+        name: name,
+        color: color, // { r, g, b }
+        creator: socket.id,
+        creatorName: playerData.name,
+        members: [socket.id],
+        requests: []
+      };
+
+      // Update player's team
+      playerData.teamId = teamId;
+      playerData.color = 0; // Custom color, index 0 will be overridden by teamColor
+
+      io.emit('TEAM_CREATED', { teamId, team: teams[teamId] });
+      io.emit('TEAMS_UPDATE', { teams });
+      
+      socket.emit('TEAM_JOINED', { teamId, team: teams[teamId] });
+    });
+
+    socket.on('request_join_team', (data) => {
+      const { teamId } = data;
+      const playerData = players[socket.id];
+      
+      if (!playerData || !teams[teamId]) return;
+      
+      // Check if already in a team
+      if (playerData.teamId) {
+        socket.emit('TEAM_ERROR', { message: 'Already in a team. Leave your current team first.' });
+        return;
+      }
+
+      // Check if already requested
+      if (teams[teamId].requests.includes(socket.id)) {
+        socket.emit('TEAM_ERROR', { message: 'Already requested to join this team.' });
+        return;
+      }
+
+      teams[teamId].requests.push(socket.id);
+      
+      // Notify team creator
+      io.to(teams[teamId].creator).emit('TEAM_REQUEST', {
+        teamId,
+        playerId: socket.id,
+        playerName: playerData.name
+      });
+
+      socket.emit('TEAM_REQUEST_SENT', { teamId });
+    });
+
+    socket.on('accept_team_request', (data) => {
+      const { teamId, playerId } = data;
+      const team = teams[teamId];
+      const playerData = players[playerId];
+      
+      if (!team || !playerData) return;
+      
+      // Check if requester is the creator
+      if (team.creator !== socket.id) {
+        socket.emit('TEAM_ERROR', { message: 'Only team creator can accept requests.' });
+        return;
+      }
+
+      // Remove from requests
+      team.requests = team.requests.filter(id => id !== playerId);
+      
+      // Add to members
+      team.members.push(playerId);
+      playerData.teamId = teamId;
+
+      io.emit('TEAMS_UPDATE', { teams });
+      io.to(playerId).emit('TEAM_JOINED', { teamId, team });
+    });
+
+    socket.on('deny_team_request', (data) => {
+      const { teamId, playerId } = data;
+      const team = teams[teamId];
+      
+      if (!team) return;
+      
+      // Check if requester is the creator
+      if (team.creator !== socket.id) return;
+
+      // Remove from requests
+      team.requests = team.requests.filter(id => id !== playerId);
+      
+      io.to(playerId).emit('TEAM_REQUEST_DENIED', { teamId });
+    });
+
+    socket.on('leave_team', () => {
+      const playerData = players[socket.id];
+      
+      if (!playerData || !playerData.teamId) return;
+      
+      const teamId = playerData.teamId;
+      const team = teams[teamId];
+      
+      if (!team) return;
+
+      // Remove from members
+      team.members = team.members.filter(id => id !== socket.id);
+      playerData.teamId = null;
+      playerData.color = 0; // Reset to no team
+
+      // If creator leaves, disband team
+      if (team.creator === socket.id) {
+        // Notify all members
+        team.members.forEach(memberId => {
+          if (players[memberId]) {
+            players[memberId].teamId = null;
+            players[memberId].color = 0;
+            io.to(memberId).emit('TEAM_DISBANDED', { teamId });
+          }
+        });
+        delete teams[teamId];
+      }
+
+      io.emit('TEAMS_UPDATE', { teams });
+      socket.emit('TEAM_LEFT', { teamId });
+    });
+
+    socket.on('update_team', (data) => {
+      const { teamId, name, color } = data;
+      const team = teams[teamId];
+      
+      if (!team) return;
+      
+      // Check if requester is the creator
+      if (team.creator !== socket.id) {
+        socket.emit('TEAM_ERROR', { message: 'Only team creator can update team.' });
+        return;
+      }
+
+      if (name) team.name = name;
+      if (color) team.color = color;
+
+      io.emit('TEAMS_UPDATE', { teams });
+    });
+
+    socket.on('get_teams', () => {
+      socket.emit('TEAMS_UPDATE', { teams });
+    });
 
     socket.on('update_node', update_node);
 
