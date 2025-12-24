@@ -11,12 +11,13 @@ let chatMessages = [
     user: 'Server',
   },
 ];
+let serverStartTime = Date.now(); // Capture startup timestamp in milliseconds
 
 function getGlobals() {
   // needs to request to the server no ?
   // might send too much text maybe filtering the last chats 
   // this should be more functional ...
-  return { players, traps, serverMap, chatMessages };
+  return { players, traps, serverMap, chatMessages, serverStartTime };
 }
 
 // Ensure correct export

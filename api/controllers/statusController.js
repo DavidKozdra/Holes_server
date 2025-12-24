@@ -5,7 +5,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const globals = getGlobals();
-let { players } = globals;
+let { players, serverStartTime } = globals;
 
 // This references the root './logo.png'
 const ServerLogo = (process.env.SERVER_LOGO===""|| process.env.SERVER_LOGO === null ) ? process.env.SERVER_LOGO: './logo.png';
@@ -28,5 +28,6 @@ exports.getStatus = (req, res) => {
     image: `data:image/png;base64,${base64Image}`,  
     name: ServerName,
     max: get_max,
+    serverStartTime: serverStartTime,
   });
 };
