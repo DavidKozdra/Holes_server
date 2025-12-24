@@ -7,6 +7,7 @@ const { saveState, loadState } = require('./utils/persistence');
 const { logger, DATA_DIR } = require('./utils/logger');
 const fs = require('fs');
 const { getGlobals } = require('./globals'); // Ensure correct import
+const { AISpawningSystem } = require('./utils/aiSystem');
 const { exec } = require('child_process');
 const globals = getGlobals(); // Now it correctly retrieves global variables
 let { players, serverMap, chatMessages, teams } = globals;
@@ -90,6 +91,9 @@ const io = socket(server, {
 
 io.sockets.on('connection', newConnection);
 
+// Initialize AI Spawning System
+let aiSpawner = new AISpawningSystem(io);
+
 app.use(allRoutes);
 
 // Attempt to load saved world state on startup
@@ -171,6 +175,21 @@ function newConnection(socket) {
     console.log('New connection: ' + socket.id);
     try { logger.info('Client connected', { id: socket.id }); } catch {}
     io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
+    
+    // Send existing AI entities to new client
+    if (aiSpawner && aiSpawner.aiEntities) {
+      for (let aiId in aiSpawner.aiEntities) {
+        let ai = aiSpawner.aiEntities[aiId];
+        io.to(socket.id).emit('NEW_AI_ENTITY', {
+          id: aiId,
+          pos: { x: ai.pos.x, y: ai.pos.y },
+          race: ai.race,
+          level: ai.level,
+          color: ai.color
+        });
+      }
+    }
+    
     io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
     if (TIMER_DISABLED) {
@@ -1088,15 +1107,26 @@ function newConnection(socket) {
 
     function send_message(data) {
       //console.log("send", data);
-      // Expecting data in the format "x,y,message"
+      // Expecting data in the format "x,y,message" or "x,y,name,message" for AI entities
       let parts = data.split(',');
       let x = parseFloat(parts[0]);
       let y = parseFloat(parts[1]);
-      let message = parts.slice(2).join(','); // Handles commas in the message
-
-      // Retrieve the sender's name if available; otherwise, fallback to socket.id.
-      let user =
-        players[socket.id] && players[socket.id].name ? players[socket.id].name : socket.id;
+      
+      // Check if third part is a name (AI entity format) or part of message
+      let user;
+      let message;
+      
+      // If parts[2] starts with "AI:" it's an AI entity name
+      if (parts[2] && parts[2].trim().includes(' the ')) {
+        // AI format: x,y,name,message
+        user = parts[2].trim();
+        message = parts.slice(3).join(',');
+      } else {
+        // Player format: x,y,message
+        message = parts.slice(2).join(',');
+        // Retrieve the sender's name if available; otherwise, fallback to socket.id.
+        user = players[socket.id] && players[socket.id].name ? players[socket.id].name : socket.id;
+      }
 
       // Create the chat message object.
       let chatMsg = { message, x, y, user };
@@ -1183,6 +1213,41 @@ function newConnection(socket) {
 
       // Instruct all clients to update the player’s render status
       io.emit('PLAYER_MARKED_DEAD', { id });
+    });
+    
+    // AI Entity damage handler
+    socket.on('ai_damage', (data) => {
+      if (aiSpawner && aiSpawner.aiEntities[data.id]) {
+        let result = aiSpawner.handleAIDamage(data.id, data.damage);
+        if (result) {
+          io.emit('UPDATE_AI_ENTITY', {
+            id: data.id,
+            hp: result.hp,
+            pos: aiSpawner.aiEntities[data.id].pos
+          });
+          
+          if (!result.alive) {
+            aiSpawner.removeAIEntity(data.id);
+          }
+        }
+      }
+    });
+
+    socket.on('ai_entity_died', (data) => {
+      if (aiSpawner) {
+        aiSpawner.removeAIEntity(data.id);
+      }
+    });
+
+    socket.on('update_ai_pos', (data) => {
+      if (aiSpawner && aiSpawner.aiEntities[data.id]) {
+        aiSpawner.aiEntities[data.id].pos = data.pos;
+        if (data.hp !== undefined) {
+          aiSpawner.aiEntities[data.id].hp = data.hp;
+        }
+        // Broadcast to all clients
+        io.emit('UPDATE_AI_ENTITY', data);
+      }
     });
   } catch (e) {
     console.log(e);
@@ -1304,6 +1369,13 @@ setInterval(() => {
     countdown--;
   }
 }, 1000); // Runs every second
+
+// AI Spawning system update loop
+setInterval(() => {
+  if (aiSpawner) {
+    aiSpawner.update();
+  }
+}, 100); // Update AI system every 100ms
 
 function ensureItemBagSchema(bag) {
   if (!bag) return null;
