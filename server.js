@@ -16,6 +16,7 @@ console.log(countdown, 'COUNT');
 const allRoutes = require('./api/routes/Routes');
 const port = process.env.PORT || 3000;
 const app = express();
+const MAX_PLAYERS = parseInt(process.env.MAX, 10) || 10;
 
 // ✅ Basic bad word filter (case-insensitive)
 const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag'];
@@ -56,6 +57,18 @@ function newConnection(socket) {
     //all caps means it came from the server
     //all lower means it came from the client
 
+    // Enforce max players: if full, notify and disconnect immediately
+    const currentPlayers = Object.keys(players).length;
+    if (currentPlayers >= MAX_PLAYERS) {
+      io.to(socket.id).emit('SERVER_FULL', {
+        message: 'Server is full. Please try again later.',
+        current: currentPlayers,
+        max: MAX_PLAYERS,
+      });
+      setTimeout(() => socket.disconnect(true), 100);
+      return;
+    }
+
     const minutes = Math.floor(countdown / 60);
     const seconds = countdown % 60;
     console.log('New connection: ' + socket.id);
@@ -67,6 +80,18 @@ function newConnection(socket) {
 
     socket.on('new_player', new_player);
     function new_player(data) {
+      // Double-check capacity at the moment of joining
+      const nowPlayers = Object.keys(players).length;
+      if (nowPlayers >= MAX_PLAYERS) {
+        io.to(socket.id).emit('SERVER_FULL', {
+          message: 'Server is full. Please try again later.',
+          current: nowPlayers,
+          max: MAX_PLAYERS,
+        });
+        setTimeout(() => socket.disconnect(true), 100);
+        return;
+      }
+
       const originalName = data.name;
       let name = originalName;
       let suffix = 1;
