@@ -3,16 +3,18 @@ const socket = require('socket.io');
 const cors = require('cors');
 const { validColors } = require('./utils/color');
 const { Map, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
-const { saveState, loadState } = require('./utils/persistence');
+const { saveState, loadState, clearState } = require('./utils/persistence');
 const { logger, DATA_DIR } = require('./utils/logger');
 const fs = require('fs');
 const { getGlobals } = require('./globals'); // Ensure correct import
 const { exec } = require('child_process');
-const globals = getGlobals(); // Now it correctly retrieves global variables
+const globals = getGlobals(); // Shared state object
 let { players, serverMap, chatMessages, teams } = globals;
 var kills_deaths = {};
 // Persisted player snapshots keyed by name
 let savedPlayersByName = {};
+let summaryCache = globals.summaryCache;
+let playerSnapshotCache = globals.playerSnapshotCache;
 
 const dotenv = require('dotenv');
 dotenv.config();
@@ -44,11 +46,15 @@ const TIMER_DISABLED = !SERVER_TIME_ENV || (typeof SERVER_TIME_ENV === 'string' 
 const RESTART_ON_TIMER = (process.env.RESTART_ON_TIMER || 'true').toLowerCase() === 'true';
 
 let countdown;
+let timerEndAt = null;
+let preRestartSaved = false;
 if (TIMER_DISABLED) {
   countdown = 0;
+  timerEndAt = null;
 } else {
   const parsed = Number(SERVER_TIME_ENV);
   countdown = Number.isFinite(parsed) && parsed > 0 ? parsed : 60 * 60 * 24 * 10000; // default very long
+  timerEndAt = Date.now() + countdown * 1000;
 }
 console.log(TIMER_DISABLED ? 'Timer disabled' : `COUNT: ${countdown}`);
 const allRoutes = require('./api/routes/Routes');
@@ -56,6 +62,7 @@ const port = process.env.PORT || 3000;
 const app = express();
 const MAX_PLAYERS = parseInt(process.env.MAX, 10) || 10;
 const SAVE_INTERVAL_HOURS = parseFloat(process.env.SAVE_INTERVAL_HOURS || '3');
+const SUMMARY_INTERVAL_MS = parseInt(process.env.SUMMARY_INTERVAL_MS || '30000', 10);
 
 // ✅ Basic bad word filter (case-insensitive)
 const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag'];
@@ -142,6 +149,31 @@ setInterval(() => {
   }
 }, Math.max(0.1, SAVE_INTERVAL_HOURS) * 60 * 60 * 1000);
 
+// Periodic summary snapshot cache for quick client consumption
+function snapshotServerSummary() {
+  return {
+    players: snapshotPlayersForBroadcast(),
+    teams,
+    updatedAt: Date.now(),
+  };
+}
+
+function refreshSummaryCache() {
+  const snap = snapshotServerSummary();
+  summaryCache = snap;
+  globals.summaryCache = summaryCache;
+  globals.playerSnapshotCache = snap.players || {};
+  playerSnapshotCache = globals.playerSnapshotCache;
+  return snap;
+}
+
+setInterval(() => {
+  refreshSummaryCache();
+}, Math.max(5000, SUMMARY_INTERVAL_MS));
+
+// Prime caches on startup
+refreshSummaryCache();
+
 // Save on graceful shutdown
 ['SIGINT', 'SIGTERM'].forEach((sig) => {
   process.on(sig, () => {
@@ -150,6 +182,27 @@ setInterval(() => {
     process.exit(0);
   });
 });
+
+function snapshotPlayersForBroadcast() {
+  const out = {};
+  for (const id of Object.keys(players)) {
+    const p = players[id];
+    if (!p) continue;
+    out[id] = {
+      id,
+      name: p.name,
+      pos: p.pos,
+      race: p.race,
+      color: p.color,
+      statBlock: p.statBlock,
+      invBlock: p.invBlock,
+      teamId: p.teamId,
+      kills: p.kills || 0,
+      deaths: p.deaths || 0,
+    };
+  }
+  return out;
+}
 
 function newConnection(socket) {
   try {
@@ -173,12 +226,17 @@ function newConnection(socket) {
     io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
     io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
+    // Send current summary snapshot if available
+    if (summaryCache) {
+      io.to(socket.id).emit('SERVER_SUMMARY', summaryCache);
+    }
+
     if (TIMER_DISABLED) {
       io.to(socket.id).emit('sync_time', { disabled: true });
     } else {
       const minutes = Math.floor(countdown / 60);
       const seconds = countdown % 60;
-      io.to(socket.id).emit('sync_time', { minutes, seconds, totalSeconds: countdown });
+      io.to(socket.id).emit('sync_time', { minutes, seconds, totalSeconds: countdown, endsAt: timerEndAt });
     }
 
     socket.on('new_player', new_player);
@@ -1195,6 +1253,11 @@ setInterval(() => {
   if (TIMER_DISABLED) {
     return;
   }
+
+  // Recompute countdown from end timestamp to reduce drift
+  if (timerEndAt) {
+    countdown = Math.max(0, Math.round((timerEndAt - Date.now()) / 1000));
+  }
   // Broadcast every minute
   if (countdown % 30 === 0 || countdown <= 15 / 2) {
     //console.log("heal plants");
@@ -1259,12 +1322,19 @@ setInterval(() => {
     }
   }
 
-  // Broadcast every minute
-  if (countdown % 60 === 0 || countdown <= 15) {
-    console.log(countdown, "count down")
+  // Broadcast timer more frequently near end for sync
+  if (countdown % 5 === 0 || countdown <= 15) {
     io.emit('sync_time', {
       totalSeconds: countdown,
+      endsAt: timerEndAt,
     });
+  }
+
+  // Capture a pre-restart snapshot a few seconds before shutdown so clients have data
+  if (countdown === 5 && !preRestartSaved) {
+    const preSummary = refreshSummaryCache();
+    preRestartSaved = true;
+    io.emit('SERVER_SUMMARY', preSummary);
   }
 
   // At 1 minute left
@@ -1280,12 +1350,37 @@ setInterval(() => {
   // When timer hits 0, reset
   if (countdown <= 0) {
     if (!resetCalled) {
+      // Emit final snapshot so clients can show end-of-round state
+      const finalSummary = refreshSummaryCache();
+      io.emit('ROUND_END_STATE', {
+        players: finalSummary.players,
+        teams: finalSummary.teams,
+        endedAt: finalSummary.updatedAt,
+      });
+
       io.emit('server_ended');
       resetCalled = true;
+
+      // Clear persisted world and player snapshots so next round starts fresh
+      clearState();
+
+      // Drop in-memory player data and stats
+      Object.keys(players).forEach((id) => delete players[id]);
+      savedPlayersByName = {};
+      kills_deaths = {};
+      chatMessages.length = 0;
+      Object.keys(teams).forEach((id) => delete teams[id]);
 
       // Start a fresh map and reset round timer if applicable
       serverMap = new Map(Math.random());
       countdown = 15 * 60;
+      timerEndAt = Date.now() + countdown * 1000;
+
+      // Reset pre-restart snapshot flag for the next round
+      preRestartSaved = false;
+
+      // Allow future resets if restart is suppressed
+      resetCalled = false;
 
       if (RESTART_ON_TIMER) {
         exec('pm2 restart holes-server', (err, stdout, stderr) => {

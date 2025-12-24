@@ -2,11 +2,33 @@ const fs = require('fs');
 const path = require('path');
 
 const SAVE_PATH = path.join(__dirname, '..', 'data', 'world.json');
+const WORLDS_DIR = path.join(__dirname, '..', 'data', 'worlds');
 
 function ensureDir() {
   const dir = path.dirname(SAVE_PATH);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function clearState() {
+  try {
+    // Remove main world snapshot
+    if (fs.existsSync(SAVE_PATH)) {
+      fs.unlinkSync(SAVE_PATH);
+    }
+
+    // Remove any saved world variants
+    if (fs.existsSync(WORLDS_DIR)) {
+      fs.rmSync(WORLDS_DIR, { recursive: true, force: true });
+    }
+
+    // Recreate data directory so future saves succeed
+    ensureDir();
+    return true;
+  } catch (e) {
+    console.error('Error clearing world state:', e);
+    return false;
   }
 }
 
@@ -90,4 +112,4 @@ function loadState() {
   }
 }
 
-module.exports = { saveState, loadState };
+module.exports = { saveState, loadState, clearState };
