@@ -583,6 +583,12 @@ class Placeable {
     this.ownerName = ownerName;
     this.id = id;
     this.hp = hp;
+    this.mhp = hp; // Max health
+    
+    // Add level and XP for AI entities
+    this.level = 1;
+    this.xp = 0;
+    this.xpNeeded = 10;
   }
 }
 

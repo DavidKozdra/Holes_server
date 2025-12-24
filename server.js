@@ -926,6 +926,43 @@ setInterval(() => {
     io.emit('HEAL_PLANTS', {});
   }
 
+  // Grant XP to all entities every minute
+  if (countdown % 60 === 0) {
+    let keys = Object.keys(serverMap.chunks);
+    for (let i = 0; i < keys.length; i++) {
+      let chunk = serverMap.chunks[keys[i]];
+      for (let j = 0; j < chunk.objects.length; j++) {
+        let obj = chunk.objects[j];
+        // Check if it's an entity (has brainID)
+        if (obj.brainID !== undefined && obj.level !== undefined) {
+          obj.xp += 10; // Grant 10 XP per minute
+          
+          // Level up if needed
+          while (obj.xp >= obj.xpNeeded) {
+            obj.level++;
+            obj.xp = 0;
+            obj.xpNeeded = Math.floor(obj.xpNeeded * 1.5);
+            
+            // Increase stats on level up
+            obj.hp += 10;
+            obj.mhp += 10;
+          }
+          
+          // Broadcast entity level update
+          io.emit('ENTITY_LEVEL_UPDATE', {
+            cx: chunk.cx,
+            cy: chunk.cy,
+            objPos: obj.pos,
+            level: obj.level,
+            xp: obj.xp,
+            hp: obj.hp,
+            mhp: obj.mhp
+          });
+        }
+      }
+    }
+  }
+
   // Broadcast every minute
   if (countdown % 60 === 0 || countdown <= 15) {
     console.log(countdown, "count down")
