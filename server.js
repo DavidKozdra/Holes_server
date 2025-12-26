@@ -16,6 +16,47 @@ let savedPlayersByName = {};
 let summaryCache = globals.summaryCache;
 let playerSnapshotCache = globals.playerSnapshotCache;
 
+// Save a player's current state into the savedPlayersByName cache and disk
+function savePlayerSnapshot(player) {
+  if (!player || !player.name) return false;
+
+  const cleanInv = player.invBlock
+    ? {
+        items: player.invBlock.items || {},
+        hotbar: Array.isArray(player.invBlock.hotbar)
+          ? player.invBlock.hotbar
+          : ["","","","",""],
+        selectedHotBar:
+          typeof player.invBlock.selectedHotBar === 'number'
+            ? player.invBlock.selectedHotBar
+            : 0,
+        equiped: player.invBlock.equiped || {
+          head: "",
+          neck: "",
+          chest: "",
+          legs: "",
+          feet: "",
+        },
+      }
+    : null;
+
+  savedPlayersByName[player.name] = {
+    name: player.name,
+    pos: player.pos || { x: 0, y: 0 },
+    race: player.race || null,
+    color: player.color ?? 0,
+    statBlock: player.statBlock || null,
+    invBlock: cleanInv,
+    teamId: player.teamId || null,
+  };
+
+  try {
+    saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName });
+  } catch {}
+
+  return true;
+}
+
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -183,113 +224,116 @@ refreshSummaryCache();
   });
 });
 
-function snapshotPlayersForBroadcast() {
-  const out = {};
-  for (const id of Object.keys(players)) {
-    const p = players[id];
-    if (!p) continue;
-    out[id] = {
-      id,
-      name: p.name,
-      pos: p.pos,
-      race: p.race,
-      color: p.color,
-      statBlock: p.statBlock,
-      invBlock: p.invBlock,
-      teamId: p.teamId,
-      kills: p.kills || 0,
-      deaths: p.deaths || 0,
-    };
+  function snapshotPlayersForBroadcast() {
+    const out = {};
+    for (const id of Object.keys(players)) {
+      const p = players[id];
+      if (!p) continue;
+      out[id] = {
+        id,
+        name: p.name,
+        pos: p.pos,
+        race: p.race,
+        color: p.color,
+        statBlock: p.statBlock,
+        invBlock: p.invBlock,
+        teamId: p.teamId,
+        kills: p.kills || 0,
+        deaths: p.deaths || 0,
+      };
+    }
+    return out;
   }
-  return out;
-}
 
-function newConnection(socket) {
-  try {
-    //all caps means it came from the server
-    //all lower means it came from the client
+  function newConnection(socket) {
+    try {
+      //all caps means it came from the server
+      //all lower means it came from the client
 
-    // Enforce max players: if full, notify and disconnect immediately
-    const currentPlayers = Object.keys(players).length;
-    if (currentPlayers >= MAX_PLAYERS) {
-      io.to(socket.id).emit('SERVER_FULL', {
-        message: 'Server is full. Please try again later.',
-        current: currentPlayers,
-        max: MAX_PLAYERS,
-      });
-      setTimeout(() => socket.disconnect(true), 100);
-      return;
-    }
-
-    console.log('New connection: ' + socket.id);
-    try { logger.info('Client connected', { id: socket.id }); } catch {}
-    io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
-    io.to(socket.id).emit('YOUR_ID', { id: socket.id });
-
-    // Send current summary snapshot if available
-    if (summaryCache) {
-      io.to(socket.id).emit('SERVER_SUMMARY', summaryCache);
-    }
-
-    if (TIMER_DISABLED) {
-      io.to(socket.id).emit('sync_time', { disabled: true });
-    } else {
-      const minutes = Math.floor(countdown / 60);
-      const seconds = countdown % 60;
-      io.to(socket.id).emit('sync_time', { minutes, seconds, totalSeconds: countdown, endsAt: timerEndAt });
-    }
-
-    socket.on('new_player', new_player);
-    function new_player(data) {
-      // Double-check capacity at the moment of joining
-      const nowPlayers = Object.keys(players).length;
-      if (nowPlayers >= MAX_PLAYERS) {
+      // Enforce max players: if full, notify and disconnect immediately
+      const currentPlayers = Object.keys(players).length;
+      if (currentPlayers >= MAX_PLAYERS) {
         io.to(socket.id).emit('SERVER_FULL', {
           message: 'Server is full. Please try again later.',
-          current: nowPlayers,
+          current: currentPlayers,
           max: MAX_PLAYERS,
         });
         setTimeout(() => socket.disconnect(true), 100);
         return;
       }
 
-      const originalName = data.name;
-      let name = originalName;
-      let suffix = 1;
+      console.log('New connection: ' + socket.id);
+      try { logger.info('Client connected', { id: socket.id }); } catch {}
+      io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
+      io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
-      // Replace bad words with asterisks or generic fallback
-      if (badWordRegex.test(name)) {
-        name = 'Player' + Math.random();
+      // Send current summary snapshot if available
+      if (summaryCache) {
+        io.to(socket.id).emit('SERVER_SUMMARY', summaryCache);
       }
 
-      // ✅ Ensure uniqueness
-      const nameExists = (n) => {
-        return Object.values(players).some((player) => player && player.name === n);
-      };
-
-      while (nameExists(name)) {
-        name = `${originalName}_${suffix}`;
-        suffix++;
+      if (TIMER_DISABLED) {
+        io.to(socket.id).emit('sync_time', { disabled: true });
+      } else {
+        const minutes = Math.floor(countdown / 60);
+        const seconds = countdown % 60;
+        io.to(socket.id).emit('sync_time', { minutes, seconds, totalSeconds: countdown, endsAt: timerEndAt });
       }
 
-      // ✅ Only notify if the name was changed
-      if (name !== originalName) {
-        io.to(socket.id).emit('change_name', name);
-      }
+      socket.on('new_player', new_player);
+      function new_player(data) {
+        // Double-check capacity at the moment of joining
+        const nowPlayers = Object.keys(players).length;
+        if (nowPlayers >= MAX_PLAYERS) {
+          io.to(socket.id).emit('SERVER_FULL', {
+            message: 'Server is full. Please try again later.',
+            current: nowPlayers,
+            max: MAX_PLAYERS,
+          });
+          setTimeout(() => socket.disconnect(true), 100);
+          return;
+        }
 
-      data.name = name;
-      data.kills = 0;
-      data.deaths = 0;
-      // Restore prior snapshot by name (inventory/statBlock/pos/teamId)
-      const snap = savedPlayersByName[name];
-      if (snap) {
-        try {
+        const originalName = data.name;
+        let name = originalName;
+        let suffix = 1;
+
+        // Replace bad words with asterisks or generic fallback
+        if (badWordRegex.test(name)) {
+          name = 'Player' + Math.random();
+        }
+
+        // ✅ Ensure uniqueness
+        const nameExists = (n) => {
+          return Object.values(players).some((player) => player && player.name === n);
+        };
+
+        while (nameExists(name)) {
+          name = `${originalName}_${suffix}`;
+          suffix++;
+        }
+
+        // ✅ Only notify if the name was changed
+        if (name !== originalName) {
+          io.to(socket.id).emit('change_name', name);
+        }
+
+        data.name = name;
+        data.kills = 0;
+        data.deaths = 0;
+        
+        // IMPORTANT: Restore snapshot data BEFORE storing player
+        // Otherwise disconnect will save empty inventory over old data!
+        const snap = savedPlayersByName[name];
+        if (snap) {
+          console.log(`[Spawn] Restoring saved data for "${name}" into server player object`);
           if (snap.invBlock) {
-            data.invBlock = data.invBlock || { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: { head: "", neck: "", chest: "", legs: "", feet: "" } };
-            data.invBlock.items = snap.invBlock.items || {};
-            data.invBlock.hotbar = Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar : data.invBlock.hotbar;
-            if (typeof snap.invBlock.selectedHotBar === 'number') data.invBlock.selectedHotBar = snap.invBlock.selectedHotBar;
-            data.invBlock.equiped = snap.invBlock.equiped || data.invBlock.equiped;
+            data.invBlock = {
+              items: snap.invBlock.items || {},
+              hotbar: Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar : ["","","","",""],
+              selectedHotBar: typeof snap.invBlock.selectedHotBar === 'number' ? snap.invBlock.selectedHotBar : 0,
+              equiped: snap.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" }
+            };
           }
           if (snap.statBlock) {
             data.statBlock = snap.statBlock;
@@ -300,598 +344,616 @@ function newConnection(socket) {
           if (snap.teamId) {
             data.teamId = snap.teamId;
           }
-          // Send snapshot to joining client so it can apply inventory client-side
-          io.to(socket.id).emit('PLAYER_SNAPSHOT', {
-            name,
-            invBlock: snap.invBlock || null,
-            statBlock: snap.statBlock || null,
-            pos: snap.pos || null,
-            teamId: snap.teamId || null,
-          });
-        } catch (e) {
-          console.warn('[Persistence] Failed to apply player snapshot for', name, e);
         }
-      }
-      players[data.id] = data;
+        
+        // Store player with restored data
+        players[data.id] = data;
 
-      socket.broadcast.emit('NEW_PLAYER', data);
-      try { logger.info('Player joined', { id: data.id, name: data.name }); } catch {}
+        socket.broadcast.emit('NEW_PLAYER', data);
+        try { logger.info('Player joined', { id: data.id, name: data.name }); } catch {}
 
-      io.emit('NEW_CHAT_MESSAGE', {
-        message: `${ServerWelcomeMessage} ${data.name}`,
-        x: 0,
-        y: 0,
-        user: 'SERVER',
-      });
-    }
-
-    socket.on('player_reconnected', player_reconnected);
-    function player_reconnected(data) {
-      players[data.player.id] = data.player;
-      if (kills_deaths[data.oldID] != undefined) {
-        players[data.player.id].kills = kills_deaths[data.oldID].kills;
-        players[data.player.id].deaths = kills_deaths[data.oldID].deaths;
-        delete kills_deaths[data.oldID];
-      } else {
-        players[data.player.id].kills = 0;
-        players[data.player.id].deaths = 0;
+        io.emit('NEW_CHAT_MESSAGE', {
+          message: `${ServerWelcomeMessage} ${data.name}`,
+          x: 0,
+          y: 0,
+          user: 'SERVER',
+        });
       }
 
-      socket.broadcast.emit('NEW_PLAYER', data.player);
-      socket.broadcast.emit('PLAYERS_CHECK', {
-        ids: Object.keys(players),
+      // Handle explicit item request from client after spawn
+      socket.on('request_my_items', (data) => {
+        const playerName = data.name;
+        const snap = savedPlayersByName[playerName];
+        
+        console.log(`[Items] Request from "${playerName}"`);
+        console.log(`[Items] Snapshot exists:`, !!snap);
+        
+        // ✅ If snapshot exists at all, they're a returning player
+        if (snap) {
+          console.log(`[Items] "${playerName}" is a RETURNING player - restoring old data`);
+          console.log(`[Items] Position:`, snap.pos);
+          console.log(`[Items] Level:`, snap.statBlock?.level);
+          console.log(`[Items] Items count:`, Object.keys(snap.invBlock?.items || {}).length);
+          
+          try {
+            // Update server-side player with restored data
+            if (players[socket.id]) {
+              if (snap.invBlock) {
+                players[socket.id].invBlock = {
+                  items: snap.invBlock.items || {},
+                  hotbar: Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar : ["","","","",""],
+                  selectedHotBar: typeof snap.invBlock.selectedHotBar === 'number' ? snap.invBlock.selectedHotBar : 0,
+                  equiped: snap.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" }
+                };
+              }
+              if (snap.statBlock) {
+                players[socket.id].statBlock = snap.statBlock;
+              }
+              if (snap.pos && snap.pos.x != null && snap.pos.y != null) {
+                players[socket.id].pos = snap.pos;
+              }
+              if (snap.teamId) {
+                players[socket.id].teamId = snap.teamId;
+              }
+            }
+            
+            // ✅ Send old data to client - they decide if items are empty
+            io.to(socket.id).emit('receive_my_items', {
+              hasOldItems: true, // Changed: always true if snapshot exists
+              invBlock: snap.invBlock || { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: {} },
+              statBlock: snap.statBlock || null,
+              pos: snap.pos || null,
+              teamId: snap.teamId || null,
+            });
+          } catch (e) {
+            console.warn('[Items] Failed to restore items for', playerName, e);
+            // Tell client to use starter kit on error
+            io.to(socket.id).emit('receive_my_items', { hasOldItems: false });
+          }
+        } else {
+          console.log(`[Items] "${playerName}" is a NEW player - will receive starter kit`);
+          // Tell client to give starter kit
+          io.to(socket.id).emit('receive_my_items', { hasOldItems: false });
+        }
       });
-    }
 
-    socket.on('disconnect', disconnect);
-
-    function disconnect(data) {
-      try { logger.info('Client disconnected', { id: socket.id }); } catch {}
-      console.log(socket.id + ' disconnected');
-      if (players[socket.id] != undefined) {
-        console.log(
-          '{\n' +
-            '   id: ' +
-            players[socket.id].id +
-            '\n   name: ' +
-            players[socket.id].name +
-            '\n   kills: ' +
-            players[socket.id].kills +
-            '\n   deaths: ' +
-            players[socket.id].deaths +
-            '\n}',
-        );
-        kills_deaths[socket.id] = {
-          kills: players[socket.id].kills,
-          deaths: players[socket.id].deaths,
-        };
-        // Save snapshot by player name before removal
-        const p = players[socket.id];
-        if (p && p.name) {
-          savedPlayersByName[p.name] = {
-            name: p.name,
-            pos: p.pos || { x: 0, y: 0 },
-            race: p.race || null,
-            color: p.color || 0,
-            statBlock: p.statBlock || null,
-            invBlock: p.invBlock
-              ? {
-                  items: p.invBlock.items || {},
-                  hotbar: p.invBlock.hotbar || ["","","","",""],
-                  selectedHotBar: typeof p.invBlock.selectedHotBar === 'number' ? p.invBlock.selectedHotBar : 0,
-                  equiped: p.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" },
-                }
-              : null,
-            teamId: p.teamId || null,
+      // ✅ NEW: Sync player inventory to server
+      socket.on('sync_player_inventory', (data) => {
+        if (!players[socket.id]) return;
+        
+        // Update server-side player inventory
+        if (data.invBlock) {
+          players[socket.id].invBlock = {
+            items: data.invBlock.items || {},
+            hotbar: Array.isArray(data.invBlock.hotbar) ? data.invBlock.hotbar : ["","","","",""],
+            selectedHotBar: typeof data.invBlock.selectedHotBar === 'number' ? data.invBlock.selectedHotBar : 0,
+            equiped: data.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" }
           };
-          // Opportunistic save
-          try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
         }
-      }
-
-      players[socket.id] = [];
-      delete players[socket.id];
-
-      io.emit('REMOVE_PLAYER', socket.id);
-    }
-
-    socket.on('update_pos', update_pos);
-
-    function update_pos(data) {
-      if (!players[data.id]) {
-        console.error(`Player with id ${data.id} not found.`);
-        return;
-      }
-
-      players[data.id].pos = data.pos;
-      players[data.id].holding = data.holding;
-
-      // Broadcast the updated position to other clients
-      socket.broadcast.emit('UPDATE_POS', data);
-    }
-
-    socket.on('update_player', update_player);
-
-    function update_player(data) {
-      if (!players[data.id]) {
-        console.error(`Player with id ${data.id} not found.`);
-        return;
-      }
-
-      for (let i = 0; i < data.update_names.length; i++) {
-        if (data.update_names[i].includes('stats')) {
-          players[data.id].statBlock.stats[data.update_names[i].split('stats.')[1]] =
-            data.update_values[i];
-        } else if (data.update_names[i].includes('statBlock')) {
-          console.log("statBlock update", data.update_names[i], data.update_values[i]);
-          players[data.id].statBlock[data.update_names[i].split('statBlock.')[1]] =
-            data.update_values[i];
-        } else {
-          players[data.id][data.update_names[i]] = data.update_values[i];
+        
+        // Also update position and stats if provided
+        if (data.pos) {
+          players[socket.id].pos = data.pos;
         }
-      }
-      players[data.id].pos = data.pos;
-      players[data.id].holding = data.holding;
-
-      // Broadcast the updated value to other clients
-      socket.broadcast.emit('UPDATE_PLAYER', data);
-    }
-
-    // Team management handlers
-    socket.on('create_team', (data) => {
-      const { name, color } = data;
-      const playerData = players[socket.id];
-      
-      if (!playerData) return;
-
-      // Generate unique team ID
-      const teamId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-      
-      teams[teamId] = {
-        id: teamId,
-        name: name,
-        color: color, // { r, g, b }
-        creator: socket.id,
-        creatorName: playerData.name,
-        members: [socket.id],
-        requests: []
-      };
-
-      // Update player's team
-      playerData.teamId = teamId;
-      playerData.color = 0; // Custom color, index 0 will be overridden by teamColor
-
-      io.emit('TEAM_CREATED', { teamId, team: teams[teamId] });
-      io.emit('TEAMS_UPDATE', { teams });
-      
-      socket.emit('TEAM_JOINED', { teamId, team: teams[teamId] });
-    });
-
-    socket.on('request_join_team', (data) => {
-      const { teamId } = data;
-      const playerData = players[socket.id];
-      
-      if (!playerData || !teams[teamId]) return;
-      
-      // Check if already in a team
-      if (playerData.teamId) {
-        socket.emit('TEAM_ERROR', { message: 'Already in a team. Leave your current team first.' });
-        return;
-      }
-
-      // Check if already requested
-      if (teams[teamId].requests.includes(socket.id)) {
-        socket.emit('TEAM_ERROR', { message: 'Already requested to join this team.' });
-        return;
-      }
-
-      teams[teamId].requests.push(socket.id);
-      
-      // Notify team creator
-      io.to(teams[teamId].creator).emit('TEAM_REQUEST', {
-        teamId,
-        playerId: socket.id,
-        playerName: playerData.name
+        if (data.statBlock) {
+          players[socket.id].statBlock = data.statBlock;
+        }
+        
+        console.log(`[Sync] Updated inventory for "${players[socket.id].name}" - ${Object.keys(data.invBlock?.items || {}).length} items`);
       });
 
-      socket.emit('TEAM_REQUEST_SENT', { teamId });
-    });
-
-    socket.on('accept_team_request', (data) => {
-      const { teamId, playerId } = data;
-      const team = teams[teamId];
-      const playerData = players[playerId];
-      
-      if (!team || !playerData) return;
-      
-      // Check if requester is the creator
-      if (team.creator !== socket.id) {
-        socket.emit('TEAM_ERROR', { message: 'Only team creator can accept requests.' });
-        return;
-      }
-
-      // Remove from requests
-      team.requests = team.requests.filter(id => id !== playerId);
-      
-      // Add to members
-      team.members.push(playerId);
-      playerData.teamId = teamId;
-
-      io.emit('TEAMS_UPDATE', { teams });
-      io.to(playerId).emit('TEAM_JOINED', { teamId, team });
-    });
-
-    socket.on('deny_team_request', (data) => {
-      const { teamId, playerId } = data;
-      const team = teams[teamId];
-      
-      if (!team) return;
-      
-      // Check if requester is the creator
-      if (team.creator !== socket.id) return;
-
-      // Remove from requests
-      team.requests = team.requests.filter(id => id !== playerId);
-      
-      io.to(playerId).emit('TEAM_REQUEST_DENIED', { teamId });
-    });
-
-    socket.on('leave_team', () => {
-      const playerData = players[socket.id];
-      
-      if (!playerData || !playerData.teamId) return;
-      
-      const teamId = playerData.teamId;
-      const team = teams[teamId];
-      
-      if (!team) return;
-
-      // Remove from members
-      team.members = team.members.filter(id => id !== socket.id);
-      playerData.teamId = null;
-      playerData.color = 0; // Reset to no team
-
-      // If creator leaves, disband team
-      if (team.creator === socket.id) {
-        // Notify all members
-        team.members.forEach(memberId => {
-          if (players[memberId]) {
-            players[memberId].teamId = null;
-            players[memberId].color = 0;
-            io.to(memberId).emit('TEAM_DISBANDED', { teamId });
-          }
-        });
-        delete teams[teamId];
-      }
-
-      io.emit('TEAMS_UPDATE', { teams });
-      socket.emit('TEAM_LEFT', { teamId });
-    });
-
-    socket.on('update_team', (data) => {
-      const { teamId, name, color } = data;
-      const team = teams[teamId];
-      
-      if (!team) return;
-      
-      // Check if requester is the creator
-      if (team.creator !== socket.id) {
-        socket.emit('TEAM_ERROR', { message: 'Only team creator can update team.' });
-        return;
-      }
-
-      if (name) team.name = name;
-      if (color) team.color = color;
-
-      io.emit('TEAMS_UPDATE', { teams });
-    });
-
-    socket.on('get_teams', () => {
-      socket.emit('TEAMS_UPDATE', { teams });
-    });
-
-    socket.on('update_node', update_node);
-
-    function update_node(data) {
-      let chunkPos = data.chunkPos.split(',');
-      chunkPos[0] = parseInt(chunkPos[0]);
-      chunkPos[1] = parseInt(chunkPos[1]);
-      let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
-
-      if (data.amt > 0) {
-        if (chunk.data[data.index] > 0) chunk.data[data.index] -= data.amt;
-        if (chunk.data[data.index] < 0.3 && chunk.data[data.index] !== -1) {
-          chunk.data[data.index] = 0;
+      socket.on('save_player_state', (data = {}) => {
+        const p = players[socket.id] || {};
+        console.log("save player",data.invBlock)
+        // Merge any client-provided fields before saving
+        if (data.invBlock) {
+          p.invBlock = {
+            items: data.invBlock.items || {},
+            hotbar: Array.isArray(data.invBlock.hotbar) ? data.invBlock.hotbar : ["","","","",""],
+            selectedHotBar:
+              typeof data.invBlock.selectedHotBar === 'number'
+                ? data.invBlock.selectedHotBar
+                : 0,
+            equiped: data.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" },
+          };
         }
-      } else {
-        if (chunk.data[data.index] < 1.3 && chunk.data[data.index] !== -1) {
-          chunk.data[data.index] -= data.amt;
+        if (data.statBlock) p.statBlock = data.statBlock;
+        if (data.pos && data.pos.x != null && data.pos.y != null) p.pos = data.pos;
+        if (data.teamId !== undefined) p.teamId = data.teamId;
+        if (data.race !== undefined) p.race = data.race;
+        if (data.color !== undefined) p.color = data.color;
+        if (data.name) p.name = data.name;
+
+        // Ensure the players table has this socket
+        if (!players[socket.id] && p.name) {
+          p.id = socket.id;
+          players[socket.id] = p;
         }
-        if (chunk.data[data.index] > 1.3) {
-          chunk.data[data.index] = 1.3;
+
+        const ok = savePlayerSnapshot(players[socket.id] || p);
+        io.to(socket.id).emit('PLAYER_SAVED', { ok });
+      });
+
+      socket.on('player_reconnected', player_reconnected);
+      function player_reconnected(data) {
+        players[data.player.id] = data.player;
+        if (kills_deaths[data.oldID] != undefined) {
+          players[data.player.id].kills = kills_deaths[data.oldID].kills;
+          players[data.player.id].deaths = kills_deaths[data.oldID].deaths;
+          delete kills_deaths[data.oldID];
+        } else {
+          players[data.player.id].kills = 0;
+          players[data.player.id].deaths = 0;
         }
-      }
 
-      io.emit('UPDATE_NODE', data);
-    }
-
-    socket.on('update_iron_node', update_iron_node);
-
-    function update_iron_node(data) {
-      let chunkPos = data.chunkPos.split(',');
-      chunkPos[0] = parseInt(chunkPos[0]);
-      chunkPos[1] = parseInt(chunkPos[1]);
-      let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
-
-      if (data.amt > 0) {
-        if (chunk.iron_data[data.index] > 0) chunk.iron_data[data.index] -= data.amt;
-        if (chunk.iron_data[data.index] < 0.3 && chunk.iron_data[data.index] !== -1) {
-          chunk.iron_data[data.index] = 0;
-        }
-      } else {
-        if (chunk.iron_data[data.index] < 1.3 && chunk.iron_data[data.index] !== -1) {
-          chunk.iron_data[data.index] -= data.amt;
-        }
-        if (chunk.iron_data[data.index] > 1.3) {
-          chunk.iron_data[data.index] = 1.3;
-        }
-      }
-
-      io.emit('UPDATE_IRON_NODE', data);
-    }
-
-    socket.on('update_nodes', update_nodes);
-
-    function update_nodes(data) {
-      //console.log("update nodes", data);
-      let chunk = serverMap.getChunk(data.cx, data.cy);
-      let posX = Math.round(data.pos.x / TILESIZE);
-      let posY = Math.round(data.pos.y / TILESIZE);
-      posX = posX - data.cx * CHUNKSIZE;
-      posY = posY - data.cy * CHUNKSIZE;
-      for (let x = posX - data.radius; x <= posX + data.radius; x++) {
-        for (let y = posY - data.radius; y <= posY + data.radius; y++) {
-          if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-            let index = x + y / CHUNKSIZE;
-            if (data.amt > 0) {
-              if (chunk.data[index] > 0) chunk.data[index] -= data.amt;
-              if (chunk.data[index] < 0.3 && chunk.data[index] !== -1) {
-                chunk.data[index] = 0;
-              }
-            } else {
-              if (chunk.data[index] < 1.3 && chunk.data[index] !== -1) {
-                chunk.data[index] -= data.amt;
-              }
-              if (chunk.data[index] > 1.3) {
-                chunk.data[index] = 1.3;
-              }
-            }
-          } else {
-            //deal with the edge cases where the node is outside the chunk
-            let tempChunk;
-            let index;
-            if (y < 0 && x >= 0 && x < CHUNKSIZE) {
-              // top edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
-              index = x + 1 + y / CHUNKSIZE;
-            } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
-              // bottom edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
-              index = x + -1 + y / CHUNKSIZE;
-            } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
-              // left edge
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
-              index = x + CHUNKSIZE + y / CHUNKSIZE;
-            } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-              // right edge
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
-              index = x - CHUNKSIZE + y / CHUNKSIZE;
-            } else if (x < 0 && y < 0) {
-              // top left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
-              index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
-            } else if (x >= CHUNKSIZE && y < 0) {
-              // top right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
-              index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
-            } else if (x < 0 && y >= CHUNKSIZE) {
-              // bottom left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
-              index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
-            } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
-              // bottom right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
-              index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
-            }
-            if (tempChunk != undefined) {
-              if (index != undefined) {
-                if (data.amt > 0) {
-                  if (tempChunk.data[index] > 0) tempChunk.data[index] -= data.amt;
-                  if (tempChunk.data[index] < 0.3 && tempChunk.data[index] !== -1) {
-                    tempChunk.data[index] = 0;
-                  }
-                } else {
-                  if (tempChunk.data[index] < 1.3 && tempChunk.data[index] !== -1) {
-                    tempChunk.data[index] -= data.amt;
-                  }
-                  if (tempChunk.data[index] > 1.3) {
-                    tempChunk.data[index] = 1.3;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
-      io.emit('UPDATE_NODES', data);
-    }
-
-    socket.on('update_iron_nodes', update_iron_nodes);
-
-    function update_iron_nodes(data) {
-      //console.log("update nodes", data);
-      let chunk = serverMap.getChunk(data.cx, data.cy);
-      let posX = Math.round(data.pos.x / TILESIZE);
-      let posY = Math.round(data.pos.y / TILESIZE);
-      posX = posX - data.cx * CHUNKSIZE;
-      posY = posY - data.cy * CHUNKSIZE;
-
-      let reward = 0;
-      for (let x = posX - data.radius; x <= posX + data.radius; x++) {
-        for (let y = posY - data.radius; y <= posY + data.radius; y++) {
-          if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-            let index = x + y / CHUNKSIZE;
-            if (data.amt > 0) {
-              if (chunk.iron_data[index] > 0) {
-                reward += chunk.iron_data[index];
-                chunk.iron_data[index] -= data.amt;
-              }
-              if (chunk.iron_data[index] < 0.3 && chunk.iron_data[index] !== -1) {
-                chunk.iron_data[index] = 0;
-              }
-            } else {
-              if (chunk.iron_data[index] < 1.3 && chunk.iron_data[index] !== -1) {
-                chunk.iron_data[index] -= data.amt;
-              }
-              if (chunk.iron_data[index] > 1.3) {
-                chunk.iron_data[index] = 1.3;
-              }
-            }
-          } else {
-            //deal with the edge cases where the node is outside the chunk
-            let tempChunk;
-            let index;
-            if (y < 0 && x >= 0 && x < CHUNKSIZE) {
-              // top edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
-              index = x + 1 + y / CHUNKSIZE;
-            } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
-              // bottom edge
-              tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
-              index = x + -1 + y / CHUNKSIZE;
-            } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
-              // left edge
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
-              index = x + CHUNKSIZE + y / CHUNKSIZE;
-            } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-              // right edge
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
-              index = x - CHUNKSIZE + y / CHUNKSIZE;
-            } else if (x < 0 && y < 0) {
-              // top left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
-              index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
-            } else if (x >= CHUNKSIZE && y < 0) {
-              // top right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
-              index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
-            } else if (x < 0 && y >= CHUNKSIZE) {
-              // bottom left corner
-              tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
-              index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
-            } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
-              // bottom right corner
-              tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
-              index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
-            }
-            if (tempChunk != undefined) {
-              if (index != undefined) {
-                if (data.amt > 0) {
-                  if (tempChunk.iron_data[index] > 0) {
-                    reward += tempChunk.iron_data[index];
-                    tempChunk.iron_data[index] -= data.amt;
-                  }
-                  if (tempChunk.iron_data[index] < 0.3 && tempChunk.iron_data[index] !== -1) {
-                    tempChunk.iron_data[index] = 0;
-                  }
-                } else {
-                  if (tempChunk.iron_data[index] < 1.3 && tempChunk.iron_data[index] !== -1) {
-                    tempChunk.iron_data[index] -= data.amt;
-                  }
-                  if (tempChunk.iron_data[index] > 1.3) {
-                    tempChunk.iron_data[index] = 1.3;
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (reward > 0) {
-        let itemBag = new Placeable(
-          'ItemBag',
-          data.pos.x,
-          data.pos.y,
-          0,
-          12 * 3,
-          13 * 3,
-          1,
-          11,
-          '',
-          '',
-        );
-        itemBag.type = 'InvObj';
-        itemBag.invBlock = { items: {} };
-        itemBag.invBlock.invId = Math.random() * 100000;
-        itemBag.invBlock.items['Raw Metal'] = {};
-        itemBag.invBlock.items['Raw Metal'].amount = Math.round(reward * 0.2) + 1;
-        chunk.objects.push(itemBag);
-        io.emit('NEW_OBJECT', {
-          cx: chunk.cx,
-          cy: chunk.cy,
-          obj: itemBag,
+        socket.broadcast.emit('NEW_PLAYER', data.player);
+        socket.broadcast.emit('PLAYERS_CHECK', {
+          ids: Object.keys(players),
         });
       }
-      io.emit('UPDATE_IRON_NODES', data);
-    }
 
-    socket.on('new_object', new_object);
+      socket.on('disconnect', disconnect);
 
-    function new_object(data) {
-      let chunk = serverMap.getChunk(data.cx, data.cy);
-      chunk.objects.push(data.obj);
-
-      socket.broadcast.emit('NEW_OBJECT', data);
-    }
-
-    socket.on('delete_obj', delete_obj);
-
-    function delete_obj(data) {
-      //console.log(data);
-      let chunk = serverMap.getChunk(data.cx, data.cy);
-      for (let i = chunk.objects.length - 1; i >= 0; i--) {
-        if (data.objName == 'ExpOrb') {
-          if (data.z == chunk.objects[i].z && data.id == chunk.objects[i].id) {
-            io.emit('DELETE_OBJ', data);
-            chunk.objects.splice(i, 1);
-            spawnItemBag(chunk, data);
+      function disconnect(data) {
+        try { logger.info('Client disconnected', { id: socket.id }); } catch {}
+        console.log(socket.id + ' disconnected');
+        if (players[socket.id] != undefined) {
+          console.log(
+            '{\n' +
+              '   id: ' +
+              players[socket.id].id +
+              '\n   name: ' +
+              players[socket.id].name +
+              '\n   kills: ' +
+              players[socket.id].kills +
+              '\n   deaths: ' +
+              players[socket.id].deaths +
+              '\n}',
+          );
+          kills_deaths[socket.id] = {
+            kills: players[socket.id].kills,
+            deaths: players[socket.id].deaths,
+          };
+          // Save snapshot by player name before removal
+          const p = players[socket.id];
+          if (p && p.name) {
+            // Persist latest server-side state (inventory, stats, position) before removal
+            const ok = savePlayerSnapshot(p);
+            console.log(ok ? `[SAVE] ✓ Snapshot saved for "${p.name}"` : `[SAVE] ✗ Snapshot failed for "${p.name}"`);
           }
-        } else if (data.brainID != undefined) {
-          if (data.z == chunk.objects[i].z && data.brainID == chunk.objects[i].brainID) {
-            io.emit('DELETE_OBJ', data);
-            chunk.objects.splice(i, 1);
-            spawnItemBag(chunk, data);
+        }
+
+        players[socket.id] = [];
+        delete players[socket.id];
+
+        io.emit('REMOVE_PLAYER', socket.id);
+      }
+
+      socket.on('update_pos', update_pos);
+
+      function update_pos(data) {
+        if (!players[data.id]) {
+          console.error(`Player with id ${data.id} not found.`);
+          return;
+        }
+
+        players[data.id].pos = data.pos;
+        players[data.id].holding = data.holding;
+
+        // Broadcast the updated position to other clients
+        socket.broadcast.emit('UPDATE_POS', data);
+      }
+
+      socket.on('update_player', update_player);
+
+      function update_player(data) {
+        if (!players[data.id]) {
+          console.error(`Player with id ${data.id} not found.`);
+          return;
+        }
+
+        for (let i = 0; i < data.update_names.length; i++) {
+          if (data.update_names[i].includes('stats')) {
+            players[data.id].statBlock.stats[data.update_names[i].split('stats.')[1]] =
+              data.update_values[i];
+          } else if (data.update_names[i].includes('statBlock')) {
+            console.log("statBlock update", data.update_names[i], data.update_values[i]);
+            players[data.id].statBlock[data.update_names[i].split('statBlock.')[1]] =
+              data.update_values[i];
+          } else {
+            players[data.id][data.update_names[i]] = data.update_values[i];
+          }
+        }
+        players[data.id].pos = data.pos;
+        players[data.id].holding = data.holding;
+
+        // Broadcast the updated value to other clients
+        socket.broadcast.emit('UPDATE_PLAYER', data);
+      }
+
+      // Team management handlers
+      socket.on('create_team', (data) => {
+        const { name, color } = data;
+        const playerData = players[socket.id];
+        
+        if (!playerData) return;
+
+        // Generate unique team ID
+        const teamId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        
+        teams[teamId] = {
+          id: teamId,
+          name: name,
+          color: color, // { r, g, b }
+          creator: socket.id,
+          creatorName: playerData.name,
+          members: [socket.id],
+          requests: []
+        };
+
+        // Update player's team
+        playerData.teamId = teamId;
+        playerData.color = 0; // Custom color, index 0 will be overridden by teamColor
+
+        io.emit('TEAM_CREATED', { teamId, team: teams[teamId] });
+        io.emit('TEAMS_UPDATE', { teams });
+        
+        socket.emit('TEAM_JOINED', { teamId, team: teams[teamId] });
+      });
+
+      socket.on('request_join_team', (data) => {
+        const { teamId } = data;
+        const playerData = players[socket.id];
+        
+        if (!playerData || !teams[teamId]) return;
+        
+        // Check if already in a team
+        if (playerData.teamId) {
+          socket.emit('TEAM_ERROR', { message: 'Already in a team. Leave your current team first.' });
+          return;
+        }
+
+        // Check if already requested
+        if (teams[teamId].requests.includes(socket.id)) {
+          socket.emit('TEAM_ERROR', { message: 'Already requested to join this team.' });
+          return;
+        }
+
+        teams[teamId].requests.push(socket.id);
+        
+        // Notify team creator
+        io.to(teams[teamId].creator).emit('TEAM_REQUEST', {
+          teamId,
+          playerId: socket.id,
+          playerName: playerData.name
+        });
+
+        socket.emit('TEAM_REQUEST_SENT', { teamId });
+      });
+
+      socket.on('accept_team_request', (data) => {
+        const { teamId, playerId } = data;
+        const team = teams[teamId];
+        const playerData = players[playerId];
+        
+        if (!team || !playerData) return;
+        
+        // Check if requester is the creator
+        if (team.creator !== socket.id) {
+          socket.emit('TEAM_ERROR', { message: 'Only team creator can accept requests.' });
+          return;
+        }
+
+        // Remove from requests
+        team.requests = team.requests.filter(id => id !== playerId);
+        
+        // Add to members
+        team.members.push(playerId);
+        playerData.teamId = teamId;
+
+        io.emit('TEAMS_UPDATE', { teams });
+        io.to(playerId).emit('TEAM_JOINED', { teamId, team });
+      });
+
+      socket.on('deny_team_request', (data) => {
+        const { teamId, playerId } = data;
+        const team = teams[teamId];
+        
+        if (!team) return;
+        
+        // Check if requester is the creator
+        if (team.creator !== socket.id) return;
+
+        // Remove from requests
+        team.requests = team.requests.filter(id => id !== playerId);
+        
+        io.to(playerId).emit('TEAM_REQUEST_DENIED', { teamId });
+      });
+
+      socket.on('leave_team', () => {
+        const playerData = players[socket.id];
+        
+        if (!playerData || !playerData.teamId) return;
+        
+        const teamId = playerData.teamId;
+        const team = teams[teamId];
+        
+        if (!team) return;
+
+        // Remove from members
+        team.members = team.members.filter(id => id !== socket.id);
+        playerData.teamId = null;
+        playerData.color = 0; // Reset to no team
+
+        // If creator leaves, disband team
+        if (team.creator === socket.id) {
+          // Notify all members
+          team.members.forEach(memberId => {
+            if (players[memberId]) {
+              players[memberId].teamId = null;
+              players[memberId].color = 0;
+              io.to(memberId).emit('TEAM_DISBANDED', { teamId });
+            }
+          });
+          delete teams[teamId];
+        }
+
+        io.emit('TEAMS_UPDATE', { teams });
+        socket.emit('TEAM_LEFT', { teamId });
+      });
+
+      socket.on('update_team', (data) => {
+        const { teamId, name, color } = data;
+        const team = teams[teamId];
+        
+        if (!team) return;
+        
+        // Check if requester is the creator
+        if (team.creator !== socket.id) {
+          socket.emit('TEAM_ERROR', { message: 'Only team creator can update team.' });
+          return;
+        }
+
+        if (name) team.name = name;
+        if (color) team.color = color;
+
+        io.emit('TEAMS_UPDATE', { teams });
+      });
+
+      socket.on('get_teams', () => {
+        socket.emit('TEAMS_UPDATE', { teams });
+      });
+
+      socket.on('update_node', update_node);
+
+      function update_node(data) {
+        let chunkPos = data.chunkPos.split(',');
+        chunkPos[0] = parseInt(chunkPos[0]);
+        chunkPos[1] = parseInt(chunkPos[1]);
+        let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
+
+        if (data.amt > 0) {
+          if (chunk.data[data.index] > 0) chunk.data[data.index] -= data.amt;
+          if (chunk.data[data.index] < 0.3 && chunk.data[data.index] !== -1) {
+            chunk.data[data.index] = 0;
           }
         } else {
-          if (
-            data.pos.x == chunk.objects[i].pos.x &&
-            data.pos.y == chunk.objects[i].pos.y &&
-            data.z == chunk.objects[i].z &&
-            data.objName == chunk.objects[i].objName
-          ) {
-            io.emit('DELETE_OBJ', data);
-            chunk.objects.splice(i, 1);
-            spawnItemBag(chunk, data);
+          if (chunk.data[data.index] < 1.3 && chunk.data[data.index] !== -1) {
+            chunk.data[data.index] -= data.amt;
+          }
+          if (chunk.data[data.index] > 1.3) {
+            chunk.data[data.index] = 1.3;
           }
         }
-      }
-    }
 
-    function spawnItemBag(chunk, data) {
-      if (data.cost != undefined) {
-        if (data.cost.length > 0) {
+        io.emit('UPDATE_NODE', data);
+      }
+
+      socket.on('update_iron_node', update_iron_node);
+
+      function update_iron_node(data) {
+        let chunkPos = data.chunkPos.split(',');
+        chunkPos[0] = parseInt(chunkPos[0]);
+        chunkPos[1] = parseInt(chunkPos[1]);
+        let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
+
+        if (data.amt > 0) {
+          if (chunk.iron_data[data.index] > 0) chunk.iron_data[data.index] -= data.amt;
+          if (chunk.iron_data[data.index] < 0.3 && chunk.iron_data[data.index] !== -1) {
+            chunk.iron_data[data.index] = 0;
+          }
+        } else {
+          if (chunk.iron_data[data.index] < 1.3 && chunk.iron_data[data.index] !== -1) {
+            chunk.iron_data[data.index] -= data.amt;
+          }
+          if (chunk.iron_data[data.index] > 1.3) {
+            chunk.iron_data[data.index] = 1.3;
+          }
+        }
+
+        io.emit('UPDATE_IRON_NODE', data);
+      }
+
+      socket.on('update_nodes', update_nodes);
+
+      function update_nodes(data) {
+        //console.log("update nodes", data);
+        let chunk = serverMap.getChunk(data.cx, data.cy);
+        let posX = Math.round(data.pos.x / TILESIZE);
+        let posY = Math.round(data.pos.y / TILESIZE);
+        posX = posX - data.cx * CHUNKSIZE;
+        posY = posY - data.cy * CHUNKSIZE;
+        for (let x = posX - data.radius; x <= posX + data.radius; x++) {
+          for (let y = posY - data.radius; y <= posY + data.radius; y++) {
+            if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
+              let index = x + y / CHUNKSIZE;
+              if (data.amt > 0) {
+                if (chunk.data[index] > 0) chunk.data[index] -= data.amt;
+                if (chunk.data[index] < 0.3 && chunk.data[index] !== -1) {
+                  chunk.data[index] = 0;
+                }
+              } else {
+                if (chunk.data[index] < 1.3 && chunk.data[index] !== -1) {
+                  chunk.data[index] -= data.amt;
+                }
+                if (chunk.data[index] > 1.3) {
+                  chunk.data[index] = 1.3;
+                }
+              }
+            } else {
+              //deal with the edge cases where the node is outside the chunk
+              let tempChunk;
+              let index;
+              if (y < 0 && x >= 0 && x < CHUNKSIZE) {
+                // top edge
+                tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
+                index = x + 1 + y / CHUNKSIZE;
+              } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
+                // bottom edge
+                tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
+                index = x + -1 + y / CHUNKSIZE;
+              } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
+                // left edge
+                tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
+                index = x + CHUNKSIZE + y / CHUNKSIZE;
+              } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
+                // right edge
+                tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
+                index = x - CHUNKSIZE + y / CHUNKSIZE;
+              } else if (x < 0 && y < 0) {
+                // top left corner
+                tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
+                index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
+              } else if (x >= CHUNKSIZE && y < 0) {
+                // top right corner
+                tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
+                index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
+              } else if (x < 0 && y >= CHUNKSIZE) {
+                // bottom left corner
+                tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
+                index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
+              } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
+                // bottom right corner
+                tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
+                index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
+              }
+              if (tempChunk != undefined) {
+                if (index != undefined) {
+                  if (data.amt > 0) {
+                    if (tempChunk.data[index] > 0) tempChunk.data[index] -= data.amt;
+                    if (tempChunk.data[index] < 0.3 && tempChunk.data[index] !== -1) {
+                      tempChunk.data[index] = 0;
+                    }
+                  } else {
+                    if (tempChunk.data[index] < 1.3 && tempChunk.data[index] !== -1) {
+                      tempChunk.data[index] -= data.amt;
+                    }
+                    if (tempChunk.data[index] > 1.3) {
+                      tempChunk.data[index] = 1.3;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        io.emit('UPDATE_NODES', data);
+      }
+
+      socket.on('update_iron_nodes', update_iron_nodes);
+
+      function update_iron_nodes(data) {
+        //console.log("update nodes", data);
+        let chunk = serverMap.getChunk(data.cx, data.cy);
+        let posX = Math.round(data.pos.x / TILESIZE);
+        let posY = Math.round(data.pos.y / TILESIZE);
+        posX = posX - data.cx * CHUNKSIZE;
+        posY = posY - data.cy * CHUNKSIZE;
+
+        let reward = 0;
+        for (let x = posX - data.radius; x <= posX + data.radius; x++) {
+          for (let y = posY - data.radius; y <= posY + data.radius; y++) {
+            if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
+              let index = x + y / CHUNKSIZE;
+              if (data.amt > 0) {
+                if (chunk.iron_data[index] > 0) {
+                  reward += chunk.iron_data[index];
+                  chunk.iron_data[index] -= data.amt;
+                }
+                if (chunk.iron_data[index] < 0.3 && chunk.iron_data[index] !== -1) {
+                  chunk.iron_data[index] = 0;
+                }
+              } else {
+                if (chunk.iron_data[index] < 1.3 && chunk.iron_data[index] !== -1) {
+                  chunk.iron_data[index] -= data.amt;
+                }
+                if (chunk.iron_data[index] > 1.3) {
+                  chunk.iron_data[index] = 1.3;
+                }
+              }
+            } else {
+              //deal with the edge cases where the node is outside the chunk
+              let tempChunk;
+              let index;
+              if (y < 0 && x >= 0 && x < CHUNKSIZE) {
+                // top edge
+                tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
+                index = x + 1 + y / CHUNKSIZE;
+              } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
+                // bottom edge
+                tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
+                index = x + -1 + y / CHUNKSIZE;
+              } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
+                // left edge
+                tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
+                index = x + CHUNKSIZE + y / CHUNKSIZE;
+              } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
+                // right edge
+                tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
+                index = x - CHUNKSIZE + y / CHUNKSIZE;
+              } else if (x < 0 && y < 0) {
+                // top left corner
+                tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
+                index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
+              } else if (x >= CHUNKSIZE && y < 0) {
+                // top right corner
+                tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
+                index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
+              } else if (x < 0 && y >= CHUNKSIZE) {
+                // bottom left corner
+                tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
+                index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
+              } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
+                // bottom right corner
+                tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
+                index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
+              }
+              if (tempChunk != undefined) {
+                if (index != undefined) {
+                  if (data.amt > 0) {
+                    if (tempChunk.iron_data[index] > 0) {
+                      reward += tempChunk.iron_data[index];
+                      tempChunk.iron_data[index] -= data.amt;
+                    }
+                    if (tempChunk.iron_data[index] < 0.3 && tempChunk.iron_data[index] !== -1) {
+                      tempChunk.iron_data[index] = 0;
+                    }
+                  } else {
+                    if (tempChunk.iron_data[index] < 1.3 && tempChunk.iron_data[index] !== -1) {
+                      tempChunk.iron_data[index] -= data.amt;
+                    }
+                    if (tempChunk.iron_data[index] > 1.3) {
+                      tempChunk.iron_data[index] = 1.3;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        if (reward > 0) {
           let itemBag = new Placeable(
             'ItemBag',
             data.pos.x,
@@ -907,22 +969,8 @@ function newConnection(socket) {
           itemBag.type = 'InvObj';
           itemBag.invBlock = { items: {} };
           itemBag.invBlock.invId = Math.random() * 100000;
-          for (let i = 0; i < data.cost.length; i++) {
-            if (data.cost[i][0] == 'dirt') {
-            } else {
-              if (data.cost[i][1] >= 1) {
-                itemBag.invBlock.items[data.cost[i][0]] = {};
-                itemBag.invBlock.items[data.cost[i][0]].amount = Math.round(
-                  data.cost[i][1] * (Math.random() * 0.4 + 0.5),
-                );
-              } else {
-                if (Math.random() < data.cost[i][1]) {
-                  itemBag.invBlock.items[data.cost[i][0]] = {};
-                  itemBag.invBlock.items[data.cost[i][0]].amount = 1;
-                }
-              }
-            }
-          }
+          itemBag.invBlock.items['Raw Metal'] = {};
+          itemBag.invBlock.items['Raw Metal'].amount = Math.round(reward * 0.2) + 1;
           chunk.objects.push(itemBag);
           io.emit('NEW_OBJECT', {
             cx: chunk.cx,
@@ -930,322 +978,409 @@ function newConnection(socket) {
             obj: itemBag,
           });
         }
+        io.emit('UPDATE_IRON_NODES', data);
       }
 
-      mergeAllChunkBags();
-    }
+      socket.on('new_object', new_object);
 
-    socket.on('update_obj', update_obj);
+      function new_object(data) {
+        let chunk = serverMap.getChunk(data.cx, data.cy);
+        chunk.objects.push(data.obj);
 
-    function update_obj(data) {
-      let chunk = serverMap.getChunk(data.cx, data.cy);
-      for (let i = chunk.objects.length - 1; i >= 0; i--) {
-        if (data.objName == 'ExpOrb') {
-          if (data.z == chunk.objects[i].z && data.id == chunk.objects[i].id) {
-            chunk.objects[i][data.update_name] = data.update_value;
-            chunk.objects[i].pos.x = data.pos.x;
-            chunk.objects[i].pos.y = data.pos.y;
-            socket.broadcast.emit('UPDATE_OBJ', data);
-          }
-        } else if (data.brainID != undefined) {
-          //console.log(data);
-          if (data.z == chunk.objects[i].z && data.brainID == chunk.objects[i].brainID) {
-            chunk.objects[i][data.update_name] = data.update_value;
-            chunk.objects[i].pos.x = data.pos.x;
-            chunk.objects[i].pos.y = data.pos.y;
-            //socket.broadcast.emit("UPDATE_OBJ", data);
-          }
-        } else {
-          if (
-            data.pos.x == chunk.objects[i].pos.x &&
-            data.pos.y == chunk.objects[i].pos.y &&
-            data.z == chunk.objects[i].z &&
-            data.objName == chunk.objects[i].objName
-          ) {
-            chunk.objects[i][data.update_name] = data.update_value;
-            socket.broadcast.emit('UPDATE_OBJ', data);
-          }
-        }
+        socket.broadcast.emit('NEW_OBJECT', data);
       }
-    }
 
-    socket.on('update_inv', update_inv);
+      socket.on('delete_obj', delete_obj);
 
-    function sanitizeItems(items) {
-      const cleaned = {};
-      if (!items || typeof items !== 'object') return cleaned;
-      for (const k of Object.keys(items)) {
-        const v = items[k];
-        const amt = v && typeof v.amount === 'number' ? v.amount : Number(v?.amount);
-        if (Number.isFinite(amt) && amt > 0) cleaned[k] = { amount: Math.floor(amt) };
-      }
-      return cleaned;
-    }
-
-    function update_inv(data) {
-      const chunk = serverMap.getChunk(data.cx, data.cy);
-      if (!chunk || !Array.isArray(chunk.objects)) return;
-
-      for (let i = chunk.objects.length - 1; i >= 0; i--) {
-        const obj = chunk.objects[i];
-        const idMatch =
-          obj.invBlock && data.invId !== undefined && obj.invBlock.invId === data.invId;
-        const posMatch =
-          data.pos.x === obj.pos.x &&
-          data.pos.y === obj.pos.y &&
-          data.z === obj.z &&
-          data.objName === obj.objName;
-
-        const hasInventory = obj && (obj.invBlock || obj.objName === 'Chest' || obj.objName === 'ItemBag');
-
-        if (hasInventory && (idMatch || posMatch)) {
-          obj.invBlock = obj.invBlock || { items: {} };
-          obj.invBlock.items = sanitizeItems(data.items);
-          if (typeof obj.invBlock.invId !== 'number' && typeof data.invId === 'number') {
-            obj.invBlock.invId = data.invId;
-          }
-          const payload = {
-            cx: data.cx,
-            cy: data.cy,
-            objName: data.objName,
-            pos: data.pos,
-            z: data.z,
-            invId: obj.invBlock.invId,
-            items: obj.invBlock.items,
-          };
-          io.emit('UPDATE_INV', payload); // send to everyone, including sender
-          break;
-        }
-      }
-    }
-
-    socket.on('new_proj', new_projectile);
-
-    function new_projectile(data) {
-      //add projectiles to server map
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
-      chunk.projectiles.push(data);
-      socket.broadcast.emit('NEW_PROJECTILE', data);
-    }
-
-    socket.on('delete_proj', delete_projectile);
-
-    function delete_projectile(data) {
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
-      for (let i = chunk.projectiles.length - 1; i >= 0; i--) {
-        if (
-          data.id == chunk.projectiles[i].id &&
-          data.lifeSpan == chunk.projectiles[i].lifeSpan &&
-          data.name == chunk.projectiles[i].name &&
-          data.ownerName == chunk.projectiles[i].ownerName
-        ) {
-          socket.broadcast.emit('DELETE_PROJ', data);
-          chunk.projectiles.splice(i, 1);
-        }
-      }
-    }
-
-    socket.on('new_sound', new_sound);
-
-    function new_sound(data) {
-      //add sounds to server map
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
-      chunk.soundObjs.push(data);
-      socket.broadcast.emit('NEW_SOUND', data);
-    }
-
-    socket.on('delete_sound', delete_sound);
-
-    function delete_sound(data) {
-      let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
-      for (let i = chunk.soundObjs.length - 1; i >= 0; i--) {
-        if (
-          data.id == chunk.soundObjs[i].id &&
-          data.lifeSpan == chunk.soundObjs[i].lifeSpan &&
-          data.pos.x == chunk.soundObjs[i].pos.x &&
-          data.pos.y == chunk.soundObjs[i].pos.y
-        ) {
-          chunk.soundObjs.splice(i, 1);
-        }
-      }
-    }
-
-    socket.on('wander_request', wander_request);
-
-    function wander_request(data) {
-      for (let i = 0; i < serverMap.brains.length; i++) {
-        if (data.id == serverMap.brains[i].id) {
-          let angle = Math.random() * 2 * Math.PI;
-          let target = {
-            x: data.pos.x + Math.cos(angle) * 100,
-            y: data.pos.y + Math.sin(angle) * 100,
-          };
-
-          io.emit('WANDER_TARGET', { id: data.id, target: target });
-          serverMap.brains[i].target = target;
-
-          i = serverMap.brains.length;
-        }
-      }
-    }
-
-    socket.on('get_chunk', get_chunk);
-
-    function get_chunk(data) {
-      let pos = data.split(',');
-      pos[0] = parseInt(pos[0]);
-      pos[1] = parseInt(pos[1]);
-      let chunk = serverMap.getChunk(pos[0], pos[1]);
-      let tempData = {};
-      for (let x = 0; x < CHUNKSIZE; x++) {
-        for (let y = 0; y < CHUNKSIZE; y++) {
-          tempData[x + y * CHUNKSIZE] = chunk.data[x + y * CHUNKSIZE];
-        }
-      }
-      let tempData2 = {};
-      for (let x = 0; x < CHUNKSIZE; x++) {
-        for (let y = 0; y < CHUNKSIZE; y++) {
-          tempData2[x + y * CHUNKSIZE] = chunk.iron_data[x + y * CHUNKSIZE];
-        }
-      }
-      io.to(socket.id).emit('GIVE_CHUNK', {
-        x: pos[0],
-        y: pos[1],
-        data: tempData,
-        iron_data: tempData2,
-        objects: chunk.objects,
-        projectiles: chunk.projectiles,
-      });
-    }
-
-    socket.on('get_portals', get_portals);
-
-    function get_portals(data) {
-      let portals = [];
-      for (let y = data.cPos.y - 5; y <= data.cPos.y + 5; y++) {
-        for (let x = data.cPos.x - 5; x <= data.cPos.x + 5; x++) {
-          if (serverMap.chunks['' + x + ',' + y] != undefined) {
-            let chunk = serverMap.chunks['' + x + ',' + y];
-            for (let i = 0; i < chunk.objects.length; i++) {
-              if (chunk.objects[i].objName == 'Portal') {
-                portals.push({
-                  cx: x,
-                  cy: y,
-                  pos: chunk.objects[i].pos,
-                  color: chunk.objects[i].color,
-                });
-              }
+      function delete_obj(data) {
+        //console.log(data);
+        let chunk = serverMap.getChunk(data.cx, data.cy);
+        for (let i = chunk.objects.length - 1; i >= 0; i--) {
+          if (data.objName == 'ExpOrb') {
+            if (data.z == chunk.objects[i].z && data.id == chunk.objects[i].id) {
+              io.emit('DELETE_OBJ', data);
+              chunk.objects.splice(i, 1);
+              spawnItemBag(chunk, data);
             }
-          }
-        }
-      }
-      io.to(socket.id).emit('GIVE_PORTALS', { portals: portals });
-    }
-
-    socket.on('send_message', send_message);
-
-    function send_message(data) {
-      //console.log("send", data);
-      // Expecting data in the format "x,y,message"
-      let parts = data.split(',');
-      let x = parseFloat(parts[0]);
-      let y = parseFloat(parts[1]);
-      let message = parts.slice(2).join(','); // Handles commas in the message
-
-      // Retrieve the sender's name if available; otherwise, fallback to socket.id.
-      let user =
-        players[socket.id] && players[socket.id].name ? players[socket.id].name : socket.id;
-
-      // Create the chat message object.
-      let chatMsg = { message, x, y, user };
-
-      console.log("send", chatMsg);
-
-      // For each connected player, check if they are within hearing distance.
-      for (let id in players) {
-        //console.log(id)
-        if (players.hasOwnProperty(id)) {
-          let player = players[id];
-          //console.log(id)
-          // Ensure player has a position and hearing range defined
-          if (player && player.pos && typeof player.statBlock.stats.hearing === 'number') {
-            //console.log("num")
-            let dx = player.pos.x - x;
-            let dy = player.pos.y - y;
-            let distance = Math.sqrt(dx * dx + dy * dy);
-            //console.log("NUMBERS",distance, player.statBlock.stats.hearing*20)
-            // If the player is within their hearing range, send the chat message.
+          } else if (data.brainID != undefined) {
+            if (data.z == chunk.objects[i].z && data.brainID == chunk.objects[i].brainID) {
+              io.emit('DELETE_OBJ', data);
+              chunk.objects.splice(i, 1);
+              spawnItemBag(chunk, data);
+            }
+          } else {
             if (
-              distance <=
-              5000 +
-                player.statBlock.stats.hearing *
-                  20 *
-                  players[socket.id].statBlock.stats.speakingRange
+              data.pos.x == chunk.objects[i].pos.x &&
+              data.pos.y == chunk.objects[i].pos.y &&
+              data.z == chunk.objects[i].z &&
+              data.objName == chunk.objects[i].objName
             ) {
-              //console.log("???????",chatMsg)
-              //console.log(chatMsg)
-              //check chat message to bad words
-              if (badWordRegex.test(chatMsg.message)) {
-                chatMsg.message = 'I curse at you !!!';
+              io.emit('DELETE_OBJ', data);
+              chunk.objects.splice(i, 1);
+              spawnItemBag(chunk, data);
+            }
+          }
+        }
+      }
+
+      function spawnItemBag(chunk, data) {
+        if (data.cost != undefined) {
+          if (data.cost.length > 0) {
+            let itemBag = new Placeable(
+              'ItemBag',
+              data.pos.x,
+              data.pos.y,
+              0,
+              12 * 3,
+              13 * 3,
+              1,
+              11,
+              '',
+              '',
+            );
+            itemBag.type = 'InvObj';
+            itemBag.invBlock = { items: {} };
+            itemBag.invBlock.invId = Math.random() * 100000;
+            for (let i = 0; i < data.cost.length; i++) {
+              if (data.cost[i][0] == 'dirt') {
+              } else {
+                if (data.cost[i][1] >= 1) {
+                  itemBag.invBlock.items[data.cost[i][0]] = {};
+                  itemBag.invBlock.items[data.cost[i][0]].amount = Math.round(
+                    data.cost[i][1] * (Math.random() * 0.4 + 0.5),
+                  );
+                } else {
+                  if (Math.random() < data.cost[i][1]) {
+                    itemBag.invBlock.items[data.cost[i][0]] = {};
+                    itemBag.invBlock.items[data.cost[i][0]].amount = 1;
+                  }
+                }
               }
+            }
+            chunk.objects.push(itemBag);
+            io.emit('NEW_OBJECT', {
+              cx: chunk.cx,
+              cy: chunk.cy,
+              obj: itemBag,
+            });
+          }
+        }
 
-              io.to(id).emit('NEW_CHAT_MESSAGE', chatMsg);
+        mergeAllChunkBags();
+      }
+
+      socket.on('update_obj', update_obj);
+
+      function update_obj(data) {
+        let chunk = serverMap.getChunk(data.cx, data.cy);
+        for (let i = chunk.objects.length - 1; i >= 0; i--) {
+          if (data.objName == 'ExpOrb') {
+            if (data.z == chunk.objects[i].z && data.id == chunk.objects[i].id) {
+              chunk.objects[i][data.update_name] = data.update_value;
+              chunk.objects[i].pos.x = data.pos.x;
+              chunk.objects[i].pos.y = data.pos.y;
+              socket.broadcast.emit('UPDATE_OBJ', data);
+            }
+          } else if (data.brainID != undefined) {
+            //console.log(data);
+            if (data.z == chunk.objects[i].z && data.brainID == chunk.objects[i].brainID) {
+              chunk.objects[i][data.update_name] = data.update_value;
+              chunk.objects[i].pos.x = data.pos.x;
+              chunk.objects[i].pos.y = data.pos.y;
+              //socket.broadcast.emit("UPDATE_OBJ", data);
+            }
+          } else {
+            if (
+              data.pos.x == chunk.objects[i].pos.x &&
+              data.pos.y == chunk.objects[i].pos.y &&
+              data.z == chunk.objects[i].z &&
+              data.objName == chunk.objects[i].objName
+            ) {
+              chunk.objects[i][data.update_name] = data.update_value;
+              socket.broadcast.emit('UPDATE_OBJ', data);
             }
           }
         }
       }
-    }
 
-    //death sockets Player_Dies
-    socket.on('player_dies', (data) => {
-      //console.log(data);
-      const { x, y, id, attacker, name } = data;
-      //console.log("die mentions",x,y,id,attacker,name);
-      // Mark the player as dead in the server-side state (optional, depends on your logic)
-      if (players[id]) {
-        players[id].isDead = true; // or players[id].status = "dead", etc.
-        players[id].deaths += 1;
+      socket.on('update_inv', update_inv);
+
+      function sanitizeItems(items) {
+        const cleaned = {};
+        if (!items || typeof items !== 'object') return cleaned;
+        for (const k of Object.keys(items)) {
+          const v = items[k];
+          const amt = v && typeof v.amount === 'number' ? v.amount : Number(v?.amount);
+          if (Number.isFinite(amt) && amt > 0) cleaned[k] = { amount: Math.floor(amt) };
+        }
+        return cleaned;
       }
-      // Notify all players within range of the death
-      for (let pid in players) {
-        if (players.hasOwnProperty(pid)) {
-          let player = players[pid];
-          if (player.name == attacker) {
-            player.kills += 1;
-            //console.log(player.name, player.kills)
-          }
-          if (player && player.pos && typeof player.statBlock.stats.hearing === 'number') {
-            let dx = player.pos.x - x;
-            let dy = player.pos.y - y;
-            let distance = Math.sqrt(dx * dx + dy * dy);
-            //console.log(distance)
-            if (distance <= 1115000 + player.statBlock.stats.hearing * 20) {
-              //console.log(name + " Has been killed by " + attacker , x,y )
 
+      function update_inv(data) {
+        const chunk = serverMap.getChunk(data.cx, data.cy);
+        if (!chunk || !Array.isArray(chunk.objects)) return;
+
+        for (let i = chunk.objects.length - 1; i >= 0; i--) {
+          const obj = chunk.objects[i];
+          const idMatch =
+            obj.invBlock && data.invId !== undefined && obj.invBlock.invId === data.invId;
+          const posMatch =
+            data.pos.x === obj.pos.x &&
+            data.pos.y === obj.pos.y &&
+            data.z === obj.z &&
+            data.objName === obj.objName;
+
+          const hasInventory = obj && (obj.invBlock || obj.objName === 'Chest' || obj.objName === 'ItemBag');
+
+          if (hasInventory && (idMatch || posMatch)) {
+            obj.invBlock = obj.invBlock || { items: {} };
+            obj.invBlock.items = sanitizeItems(data.items);
+            if (typeof obj.invBlock.invId !== 'number' && typeof data.invId === 'number') {
+              obj.invBlock.invId = data.invId;
+            }
+            const payload = {
+              cx: data.cx,
+              cy: data.cy,
+              objName: data.objName,
+              pos: data.pos,
+              z: data.z,
+              invId: obj.invBlock.invId,
+              items: obj.invBlock.items,
+            };
+            io.emit('UPDATE_INV', payload); // send to everyone, including sender
+            break;
+          }
+        }
+      }
+
+      socket.on('new_proj', new_projectile);
+
+      function new_projectile(data) {
+        //add projectiles to server map
+        let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+        chunk.projectiles.push(data);
+        socket.broadcast.emit('NEW_PROJECTILE', data);
+      }
+
+      socket.on('delete_proj', delete_projectile);
+
+      function delete_projectile(data) {
+        let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+        for (let i = chunk.projectiles.length - 1; i >= 0; i--) {
+          if (
+            data.id == chunk.projectiles[i].id &&
+            data.lifeSpan == chunk.projectiles[i].lifeSpan &&
+            data.name == chunk.projectiles[i].ownerName
+          ) {
+            socket.broadcast.emit('DELETE_PROJ', data);
+            chunk.projectiles.splice(i, 1);
+          }
+        }
+      }
+
+      socket.on('new_sound', new_sound);
+
+      function new_sound(data) {
+        //add sounds to server map
+        let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+        chunk.soundObjs.push(data);
+        socket.broadcast.emit('NEW_SOUND', data);
+      }
+
+      socket.on('delete_sound', delete_sound);
+
+      function delete_sound(data) {
+        let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+        for (let i = chunk.soundObjs.length - 1; i >= 0; i--) {
+          if (
+            data.id == chunk.soundObjs[i].id &&
+            data.lifeSpan == chunk.soundObjs[i].lifeSpan &&
+            data.pos.x == chunk.soundObjs[i].pos.x &&
+            data.pos.y == chunk.soundObjs[i].pos.y
+          ) {
+            chunk.soundObjs.splice(i, 1);
+          }
+        }
+      }
+
+      socket.on('wander_request', wander_request);
+
+      function wander_request(data) {
+        for (let i = 0; i < serverMap.brains.length; i++) {
+          if (data.id == serverMap.brains[i].id) {
+            let angle = Math.random() * 2 * Math.PI;
+            let target = {
+              x: data.pos.x + Math.cos(angle) * 100,
+              y: data.pos.y + Math.sin(angle) * 100,
+            };
+
+            io.emit('WANDER_TARGET', { id: data.id, target: target });
+            serverMap.brains[i].target = target;
+
+            i = serverMap.brains.length;
+          }
+        }
+      }
+
+      socket.on('get_chunk', get_chunk);
+
+      function get_chunk(data) {
+        let pos = data.split(',');
+        pos[0] = parseInt(pos[0]);
+        pos[1] = parseInt(pos[1]);
+        let chunk = serverMap.getChunk(pos[0], pos[1]);
+        let tempData = {};
+        for (let x = 0; x < CHUNKSIZE; x++) {
+          for (let y = 0; y < CHUNKSIZE; y++) {
+            tempData[x + y * CHUNKSIZE] = chunk.data[x + y * CHUNKSIZE];
+          }
+        }
+        let tempData2 = {};
+        for (let x = 0; x < CHUNKSIZE; x++) {
+          for (let y = 0; y < CHUNKSIZE; y++) {
+            tempData2[x + y * CHUNKSIZE] = chunk.iron_data[x + y * CHUNKSIZE];
+          }
+        }
+        io.to(socket.id).emit('GIVE_CHUNK', {
+          x: pos[0],
+          y: pos[1],
+          data: tempData,
+          iron_data: tempData2,
+          objects: chunk.objects,
+          projectiles: chunk.projectiles,
+        });
+      }
+
+      socket.on('get_portals', get_portals);
+
+      function get_portals(data) {
+        let portals = [];
+        for (let y = data.cPos.y - 5; y <= data.cPos.y + 5; y++) {
+          for (let x = data.cPos.x - 5; x <= data.cPos.x + 5; x++) {
+            if (serverMap.chunks['' + x + ',' + y] != undefined) {
+              let chunk = serverMap.chunks['' + x + ',' + y];
+              for (let i = 0; i < chunk.objects.length; i++) {
+                if (chunk.objects[i].objName == 'Portal') {
+                  portals.push({
+                    cx: x,
+                    cy: y,
+                    pos: chunk.objects[i].pos,
+                    color: chunk.objects[i].color,
+                  });
+                }
+              }
+            }
+          }
+        }
+        io.to(socket.id).emit('GIVE_PORTALS', { portals: portals });
+      }
+
+      socket.on('send_message', send_message);
+
+      function send_message(data) {
+        //console.log("send", data);
+        // Expecting data in the format "x,y,message"
+        let parts = data.split(',');
+        let x = parseFloat(parts[0]);
+        let y = parseFloat(parts[1]);
+        let message = parts.slice(2).join(','); // Handles commas in the message
+
+        // Retrieve the sender's name if available; otherwise, fallback to socket.id.
+        let user =
+          players[socket.id] && players[socket.id].name ? players[socket.id].name : socket.id;
+
+        // Create the chat message object.
+        let chatMsg = { message, x, y, user };
+
+        console.log("send", chatMsg);
+
+        // For each connected player, check if they are within hearing distance.
+        for (let id in players) {
+          //console.log(id)
+          if (players.hasOwnProperty(id)) {
+            let player = players[id];
+            //console.log(id)
+            // Ensure player has a position and hearing range defined
+            if (player && player.pos && typeof player.statBlock.stats.hearing === 'number') {
+              //console.log("num")
+              let dx = player.pos.x - x;
+              let dy = player.pos.y - y;
+              let distance = Math.sqrt(dx * dx + dy * dy);
+              //console.log("NUMBERS",distance, player.statBlock.stats.hearing*20)
+              // If the player is within their hearing range, send the chat message.
+              if (
+                distance <=
+                5000 +
+                  player.statBlock.stats.hearing *
+                    20 *
+                    players[socket.id].statBlock.stats.speakingRange
+              ) {
+                //console.log("???????",chatMsg)
+                //console.log(chatMsg)
+                //check chat message to bad words
+                if (badWordRegex.test(chatMsg.message)) {
+                  chatMsg.message = 'I curse at you !!!';
+                }
+
+                io.to(id).emit('NEW_CHAT_MESSAGE', chatMsg);
+              }
+            }
+          } else {
+            //console.log("????")
+          }
+        }
+      }
+
+      //death sockets Player_Dies
+      socket.on('player_dies', (data) => {
+        //console.log(data);
+        const { x, y, id, attacker, name } = data;
+        //console.log("die mentions",x,y,id,attacker,name);
+        // Mark the player as dead in the server-side state (optional, depends on your logic)
+        if (players[id]) {
+          players[id].isDead = true; // or players[id].status = "dead", etc.
+          players[id].deaths += 1;
+        }
+        // Notify all players within range of the death
+        for (let pid in players) {
+          if (players.hasOwnProperty(pid)) {
+            let player = players[pid];
+            if (player.name == attacker) {
+              player.kills += 1;
               //console.log(player.name, player.kills)
-
-              io.to(pid).emit('NEW_CHAT_MESSAGE', {
-                message: name + ' Has been killed by ' + attacker,
-                x,
-                y,
-                user: 'SERVER',
-              });
-            } else {
-              //console.log("s2")
             }
-          }
-        } else {
-          //console.log("????")
-        }
-      }
+            if (player && player.pos && typeof player.statBlock.stats.hearing === 'number') {
+              let dx = player.pos.x - x;
+              let dy = player.pos.y - y;
+              let distance = Math.sqrt(dx * dx + dy * dy);
+              //console.log(distance)
+              if (distance <= 1115000 + player.statBlock.stats.hearing * 20) {
+                //console.log(name + " Has been killed by " + attacker , x,y )
 
-      // Instruct all clients to update the player’s render status
-      io.emit('PLAYER_MARKED_DEAD', { id });
-    });
-  } catch (e) {
-    console.log(e);
+                //console.log(player.name, player.kills)
+
+                io.to(pid).emit('NEW_CHAT_MESSAGE', {
+                  message: name + ' Has been killed by ' + attacker,
+                  x,
+                  y,
+                  user: 'SERVER',
+                });
+              } else {
+                //console.log("s2")
+              }
+            }
+          } else {
+            //console.log("????")
+          }
+        }
+
+        // Instruct all clients to update the player’s render status
+        io.emit('PLAYER_MARKED_DEAD', { id });
+      });
+    } catch (e) {
+      console.log(e);
+    }
   }
-}
 
 let resetCalled = false;
 setInterval(() => {
