@@ -151,7 +151,8 @@ app.use(
   }),
 );
 
-const ServerWelcomeMessage = process.env.Server_Welcome || 'Please Welcome';
+const ServerWelcomeNewMessage = process.env.Server_Welcome || 'Please Welcome';
+const ServerWelcomeReturningMessage = process.env.Server_Welcome_Returning || 'Welcome back';
 const path = require('path');
 
 // Serve static files using an absolute path
@@ -391,8 +392,9 @@ refreshSummaryCache();
         socket.broadcast.emit('NEW_PLAYER', data);
         try { logger.info('Player joined', { id: data.id, name: data.name }); } catch {}
 
+        const isReturning = !!snap;
         io.emit('NEW_CHAT_MESSAGE', {
-          message: `${ServerWelcomeMessage} ${data.name}`,
+          message: `${isReturning ? ServerWelcomeReturningMessage : ServerWelcomeNewMessage} ${data.name}`,
           x: 0,
           y: 0,
           user: 'SERVER',
@@ -407,7 +409,7 @@ refreshSummaryCache();
         console.log(`[Items] Request from "${playerName}"`);
         console.log(`[Items] Snapshot exists:`, !!snap);
         
-        // ✅ If snapshot exists at all, they're a returning player
+        // If snapshot exists at all, they're a returning player
         if (snap) {
           console.log(`[Items] "${playerName}" is a RETURNING player - restoring old data`);
           console.log(`[Items] Position:`, snap.pos);
@@ -1672,7 +1674,7 @@ function ensureItemBagSchema(bag) {
 
 function mergeAllChunkBags() {
   // Only merge when bags are extremely close (about 1.5 tiles)
-  const MERGE_DISTANCE = TILESIZE * 1.5;
+  const MERGE_DISTANCE = TILESIZE * 3.5;
 
   for (const key in serverMap.chunks) {
     const chunk = serverMap.chunks[key];
