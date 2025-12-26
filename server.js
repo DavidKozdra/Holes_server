@@ -16,6 +16,39 @@ let savedPlayersByName = {};
 let summaryCache = globals.summaryCache;
 let playerSnapshotCache = globals.playerSnapshotCache;
 
+// Base stats for each race - must match client-side
+const BASE_STATS = [
+  {
+    name: "gnome",
+    hp: 100, mhp: 100, healthRegen: 0.2, attack: 2, magic: 1, mp: 100, mmp: 100,
+    magicResistance: 2, luck: 10, credit: 1, hearing: 1, speakingRange: 2,
+    Fear: 1, powerLevel: 1, handDigSpeed: 0.05, runningSpeed: 1.3,
+    growth: { hp: 10, mhp: 10, attack: 2, magic: 0.5, healthRegen: 0.05, mp: 1, mmp: 1, magicResistance: 0.2, luck: 1, runningSpeed: 0.05 }
+  },
+  {
+    name: "aylah",
+    hp: 100, mhp: 100, healthRegen: 0.1, attack: 1, magic: 5, mp: 150, mmp: 150,
+    magicResistance: 5, luck: 1, credit: 1, hearing: 5, speakingRange: 1,
+    Fear: 1, powerLevel: 1, handDigSpeed: 0.07, runningSpeed: 1,
+    growth: { hp: 5, mhp: 5, attack: 0.5, magic: 2, healthRegen: 0.02, mp: 20, mmp: 20, magicResistance: 0.25, luck: 0.5, runningSpeed: 0.2 }
+  },
+  {
+    name: "skizzard",
+    hp: 100, mhp: 100, healthRegen: 5, attack: 1, magic: 1, mp: 100, mmp: 100,
+    magicResistance: 1, luck: 1, credit: 1, hearing: 5, speakingRange: 1,
+    Fear: 2, powerLevel: 1, handDigSpeed: 0.08, runningSpeed: 1.2,
+    growth: { hp: 8, mhp: 8, attack: 0.5, magic: 0.5, healthRegen: 0.06, mp: 10, mmp: 10, magicResistance: 0.1, luck: 0.5, runningSpeed: 0.11 }
+  }
+];
+
+// Ensure stats have all properties from BASE_STATS
+function ensureCompleteStats(stats, race) {
+  if (!stats || typeof race !== 'number' || !BASE_STATS[race]) return stats;
+  const baseStats = JSON.parse(JSON.stringify(BASE_STATS[race]));
+  delete baseStats.growth; // Don't include growth in merged stats
+  return Object.assign({}, baseStats, stats);
+}
+
 // Save a player's current state into the savedPlayersByName cache and disk
 function savePlayerSnapshot(player) {
   if (!player || !player.name) return false;
@@ -45,7 +78,8 @@ function savePlayerSnapshot(player) {
     pos: player.pos || { x: 0, y: 0 },
     race: player.race || null,
     color: player.color ?? 0,
-    statBlock: player.statBlock || null,
+    // Deep copy statBlock to prevent reference issues
+    statBlock: player.statBlock ? JSON.parse(JSON.stringify(player.statBlock)) : null,
     invBlock: cleanInv,
     teamId: player.teamId || null,
   };
@@ -329,17 +363,22 @@ refreshSummaryCache();
           console.log(`[Spawn] Restoring saved data for "${name}" into server player object`);
           if (snap.invBlock) {
             data.invBlock = {
-              items: snap.invBlock.items || {},
-              hotbar: Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar : ["","","","",""],
+              items: JSON.parse(JSON.stringify(snap.invBlock.items || {})),
+              hotbar: Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar.slice() : ["","","","",""],
               selectedHotBar: typeof snap.invBlock.selectedHotBar === 'number' ? snap.invBlock.selectedHotBar : 0,
-              equiped: snap.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" }
+              equiped: snap.invBlock.equiped ? JSON.parse(JSON.stringify(snap.invBlock.equiped)) : { head: "", neck: "", chest: "", legs: "", feet: "" }
             };
           }
           if (snap.statBlock) {
-            data.statBlock = snap.statBlock;
+            // Deep copy statBlock to prevent reference issues
+            data.statBlock = JSON.parse(JSON.stringify(snap.statBlock));
+            // Ensure stats have all properties from BASE_STATS
+            if (data.statBlock.stats && typeof data.race === 'number') {
+              data.statBlock.stats = ensureCompleteStats(data.statBlock.stats, data.race);
+            }
           }
           if (snap.pos && snap.pos.x != null && snap.pos.y != null) {
-            data.pos = snap.pos;
+            data.pos = { x: snap.pos.x, y: snap.pos.y };
           }
           if (snap.teamId) {
             data.teamId = snap.teamId;
@@ -380,17 +419,22 @@ refreshSummaryCache();
             if (players[socket.id]) {
               if (snap.invBlock) {
                 players[socket.id].invBlock = {
-                  items: snap.invBlock.items || {},
-                  hotbar: Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar : ["","","","",""],
+                  items: JSON.parse(JSON.stringify(snap.invBlock.items || {})),
+                  hotbar: Array.isArray(snap.invBlock.hotbar) ? snap.invBlock.hotbar.slice() : ["","","","",""],
                   selectedHotBar: typeof snap.invBlock.selectedHotBar === 'number' ? snap.invBlock.selectedHotBar : 0,
-                  equiped: snap.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" }
+                  equiped: snap.invBlock.equiped ? JSON.parse(JSON.stringify(snap.invBlock.equiped)) : { head: "", neck: "", chest: "", legs: "", feet: "" }
                 };
               }
               if (snap.statBlock) {
-                players[socket.id].statBlock = snap.statBlock;
+                // Deep copy statBlock to prevent reference issues
+                players[socket.id].statBlock = JSON.parse(JSON.stringify(snap.statBlock));
+                // Ensure stats have all properties from BASE_STATS
+                if (players[socket.id].statBlock.stats && typeof players[socket.id].race === 'number') {
+                  players[socket.id].statBlock.stats = ensureCompleteStats(players[socket.id].statBlock.stats, players[socket.id].race);
+                }
               }
               if (snap.pos && snap.pos.x != null && snap.pos.y != null) {
-                players[socket.id].pos = snap.pos;
+                players[socket.id].pos = { x: snap.pos.x, y: snap.pos.y };
               }
               if (snap.teamId) {
                 players[socket.id].teamId = snap.teamId;
@@ -398,11 +442,16 @@ refreshSummaryCache();
             }
             
             // ✅ Send old data to client - they decide if items are empty
+            // Send deep copies to prevent reference issues
+            let statBlockToSend = snap.statBlock ? JSON.parse(JSON.stringify(snap.statBlock)) : null;
+            if (statBlockToSend && statBlockToSend.stats && typeof snap.race === 'number') {
+              statBlockToSend.stats = ensureCompleteStats(statBlockToSend.stats, snap.race);
+            }
             io.to(socket.id).emit('receive_my_items', {
               hasOldItems: true, // Changed: always true if snapshot exists
-              invBlock: snap.invBlock || { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: {} },
-              statBlock: snap.statBlock || null,
-              pos: snap.pos || null,
+              invBlock: snap.invBlock ? JSON.parse(JSON.stringify(snap.invBlock)) : { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: {} },
+              statBlock: statBlockToSend,
+              pos: snap.pos ? { x: snap.pos.x, y: snap.pos.y } : null,
               teamId: snap.teamId || null,
             });
           } catch (e) {
@@ -417,7 +466,6 @@ refreshSummaryCache();
         }
       });
 
-      // ✅ NEW: Sync player inventory to server
       socket.on('sync_player_inventory', (data) => {
         if (!players[socket.id]) return;
         
@@ -1393,6 +1441,47 @@ setInterval(() => {
   if (timerEndAt) {
     countdown = Math.max(0, Math.round((timerEndAt - Date.now()) / 1000));
   }
+  // Health/Mana regeneration for all players every 3 seconds
+  if (countdown % 3 === 0) {
+    Object.keys(players).forEach(id => {
+      const p = players[id];
+      if (!p || !p.statBlock || !p.statBlock.stats) return;
+      
+      const stats = p.statBlock.stats;
+      let updated = false;
+      const updateNames = [];
+      const updateValues = [];
+      
+      // HP Regen
+      if (stats.hp < stats.mhp && stats.healthRegen > 0) {
+        stats.hp = Math.min(stats.hp + stats.healthRegen, stats.mhp);
+        updateNames.push('stats.hp');
+        updateValues.push(stats.hp);
+        updated = true;
+      }
+      
+      // MP Regen
+      if (stats.mp < stats.mmp && stats.magic > 0) {
+        const mpRegen = stats.magic * 0.1; // 10% of magic stat
+        stats.mp = Math.min(stats.mp + mpRegen, stats.mmp);
+        updateNames.push('stats.mp');
+        updateValues.push(stats.mp);
+        updated = true;
+      }
+      
+      // Broadcast update to all clients
+      if (updated) {
+        io.emit('UPDATE_PLAYER', {
+          id: id,
+          pos: p.pos,
+          holding: p.holding,
+          update_names: updateNames,
+          update_values: updateValues
+        });
+      }
+    });
+  }
+
   // Broadcast every minute
   if (countdown % 30 === 0 || countdown <= 15 / 2) {
     //console.log("heal plants");
