@@ -20,90 +20,6 @@ class Map {
       this.chunks[x + ',' + y] = new Chunk(x, y);
       this.chunks[x + ',' + y].generate();
 
-      // Spawn race entities near player spawn (200, 200) in chunk 0,0
-      if (x == 0 && y == 0) {
-        console.log('[Server] Spawning race entities near player spawn at chunk 0,0');
-        
-        // Hostile Gnome near player spawn
-        let gnomeEntity = new Placeable(
-          'Hostile Gnome',
-          150,
-          150,
-          0,
-          66,
-          88,
-          2,
-          0,
-          'Server',
-          '',
-          120,
-        );
-        gnomeEntity.brainID = Math.random() * 10000;
-        gnomeEntity.race = 0;
-        this.brains.push({ id: gnomeEntity.brainID, target: null });
-        this.chunks[x + ',' + y].objects.push(gnomeEntity);
-        console.log('[Server] Spawned Hostile Gnome at (150, 150) with brainID:', gnomeEntity.brainID);
-        
-        // Wild Aylah near player spawn
-        let aylahEntity = new Placeable(
-          'Wild Aylah',
-          200,
-          150,
-          0,
-          66,
-          88,
-          2,
-          0,
-          'Server',
-          '',
-          100,
-        );
-        aylahEntity.brainID = Math.random() * 10000;
-        aylahEntity.race = 1;
-        this.brains.push({ id: aylahEntity.brainID, target: null });
-        this.chunks[x + ',' + y].objects.push(aylahEntity);
-        console.log('[Server] Spawned Wild Aylah at (200, 150) with brainID:', aylahEntity.brainID);
-        
-        // Feral Skizzard near player spawn
-        let skizzardEntity = new Placeable(
-          'Feral Skizzard',
-          250,
-          150,
-          0,
-          66,
-          88,
-          2,
-          0,
-          'Server',
-          '',
-          100,
-        );
-        skizzardEntity.brainID = Math.random() * 10000;
-        skizzardEntity.race = 2;
-        this.brains.push({ id: skizzardEntity.brainID, target: null });
-        this.chunks[x + ',' + y].objects.push(skizzardEntity);
-        console.log('[Server] Spawned Feral Skizzard at (250, 150) with brainID:', skizzardEntity.brainID);
-        
-        // Spawn one Ant near player spawn too
-        let ant = new Placeable(
-          'Ant',
-          300,
-          150,
-          0,
-          17 * 2,
-          13 * 2,
-          2,
-          0,
-          'Server',
-          '',
-          100,
-        );
-        ant.brainID = Math.random() * 10000;
-        this.brains.push({ id: ant.brainID, target: null });
-        this.chunks[x + ',' + y].objects.push(ant);
-        console.log('[Server] Spawned Ant at (300, 150) with brainID:', ant.brainID);
-      }
-
       // Spawn ants in all chunks (including 0,0)
       if (Math.random() < 0.5) {
         let ant = new Placeable(
@@ -122,6 +38,36 @@ class Map {
         ant.brainID = Math.random() * 10000;
         this.brains.push({ id: ant.brainID, target: null });
         this.chunks[x + ',' + y].objects.push(ant);
+      }
+
+      // Spawn race entities rarely (rarer than ants) anywhere
+      const raceSpawnChance = 0.12; // ants are 0.5; this is ~4x rarer
+      if (Math.random() < raceSpawnChance) {
+        const raceTypes = [
+          { name: 'Hostile Gnome', race: 0, hp: 120 },
+          { name: 'Wild Aylah', race: 1, hp: 100 },
+          { name: 'Feral Skizzard', race: 2, hp: 100 },
+        ];
+        const choice = raceTypes[Math.floor(Math.random() * raceTypes.length)];
+        const posX = (Math.random() * CHUNKSIZE + x * CHUNKSIZE) * TILESIZE;
+        const posY = (Math.random() * CHUNKSIZE + y * CHUNKSIZE) * TILESIZE;
+        const entity = new Placeable(
+          choice.name,
+          posX,
+          posY,
+          0,
+          66,
+          88,
+          2,
+          0,
+          'Server',
+          '',
+          choice.hp,
+        );
+        entity.brainID = Math.random() * 10000;
+        entity.race = choice.race;
+        this.brains.push({ id: entity.brainID, target: null });
+        this.chunks[x + ',' + y].objects.push(entity);
       }
     }
     return this.chunks[x + ',' + y];

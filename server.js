@@ -1214,14 +1214,14 @@ refreshSummaryCache();
 
       function delete_projectile(data) {
         let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+        if (!chunk) return;
+        
         for (let i = chunk.projectiles.length - 1; i >= 0; i--) {
-          if (
-            data.id == chunk.projectiles[i].id &&
-            data.lifeSpan == chunk.projectiles[i].lifeSpan &&
-            data.name == chunk.projectiles[i].ownerName
-          ) {
-            socket.broadcast.emit('DELETE_PROJ', data);
+          // Match by ID - most reliable identifier
+          if (data.id == chunk.projectiles[i].id) {
             chunk.projectiles.splice(i, 1);
+            socket.broadcast.emit('DELETE_PROJ', data);
+            break; // Exit after first match since IDs are unique
           }
         }
       }
@@ -1324,59 +1324,70 @@ refreshSummaryCache();
       }
 
       socket.on('send_message', send_message);
+      socket.on('entity_chat', entity_chat);
+
+      function broadcastChat(chatMsg, speakingRangeOverride) {
+        if (!chatMsg || typeof chatMsg.message !== 'string') return;
+
+        // Basic sanitization and fallback values
+        const message = chatMsg.message.trim();
+        if (!message) return;
+
+        const cleanMsg = {
+          user: chatMsg.user || 'Entity',
+          message: badWordRegex.test(message) ? 'I curse at you !!!' : message,
+          x: Number.isFinite(chatMsg.x) ? chatMsg.x : 0,
+          y: Number.isFinite(chatMsg.y) ? chatMsg.y : 0,
+          time: chatMsg.time || new Date().toISOString(),
+        };
+
+        const speakerRange = Number.isFinite(speakingRangeOverride)
+          ? speakingRangeOverride
+          : players[socket.id]?.statBlock?.stats?.speakingRange || 1;
+
+        for (let id in players) {
+          if (!Object.prototype.hasOwnProperty.call(players, id)) continue;
+          const player = players[id];
+          if (!player || !player.pos || typeof player.statBlock?.stats?.hearing !== 'number') continue;
+
+          const dx = player.pos.x - cleanMsg.x;
+          const dy = player.pos.y - cleanMsg.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          if (distance <= 5000 + player.statBlock.stats.hearing * 20 * speakerRange) {
+            io.to(id).emit('NEW_CHAT_MESSAGE', cleanMsg);
+          }
+        }
+      }
 
       function send_message(data) {
-        //console.log("send", data);
-        // Expecting data in the format "x,y,message"
         let parts = data.split(',');
         let x = parseFloat(parts[0]);
         let y = parseFloat(parts[1]);
         let message = parts.slice(2).join(','); // Handles commas in the message
 
-        // Retrieve the sender's name if available; otherwise, fallback to socket.id.
         let user =
           players[socket.id] && players[socket.id].name ? players[socket.id].name : socket.id;
 
-        // Create the chat message object.
         let chatMsg = { message, x, y, user };
 
-        console.log("send", chatMsg);
+        broadcastChat(chatMsg, players[socket.id]?.statBlock?.stats?.speakingRange);
+      }
 
-        // For each connected player, check if they are within hearing distance.
-        for (let id in players) {
-          //console.log(id)
-          if (players.hasOwnProperty(id)) {
-            let player = players[id];
-            //console.log(id)
-            // Ensure player has a position and hearing range defined
-            if (player && player.pos && typeof player.statBlock.stats.hearing === 'number') {
-              //console.log("num")
-              let dx = player.pos.x - x;
-              let dy = player.pos.y - y;
-              let distance = Math.sqrt(dx * dx + dy * dy);
-              //console.log("NUMBERS",distance, player.statBlock.stats.hearing*20)
-              // If the player is within their hearing range, send the chat message.
-              if (
-                distance <=
-                5000 +
-                  player.statBlock.stats.hearing *
-                    20 *
-                    players[socket.id].statBlock.stats.speakingRange
-              ) {
-                //console.log("???????",chatMsg)
-                //console.log(chatMsg)
-                //check chat message to bad words
-                if (badWordRegex.test(chatMsg.message)) {
-                  chatMsg.message = 'I curse at you !!!';
-                }
+      function entity_chat(data) {
+        if (!data) return;
+        const msg = typeof data.message === 'string' ? data.message : '';
+        if (!msg.trim()) return;
 
-                io.to(id).emit('NEW_CHAT_MESSAGE', chatMsg);
-              }
-            }
-          } else {
-            //console.log("????")
-          }
-        }
+        const chatMsg = {
+          message: msg,
+          x: Number.isFinite(data.pos?.x) ? data.pos.x : 0,
+          y: Number.isFinite(data.pos?.y) ? data.pos.y : 0,
+          user: typeof data.user === 'string' && data.user.trim() ? data.user.trim() : 'Entity',
+          time: data.time,
+        };
+
+        const speakingRange = Number.isFinite(data.speakingRange) ? data.speakingRange : 1;
+        broadcastChat(chatMsg, speakingRange);
       }
 
       //death sockets Player_Dies
