@@ -1,5 +1,10 @@
 
 function newConnection(socket) {
+    // Listen for explosion events and broadcast to all clients
+    socket.on('EXPLOSION', (data) => {
+      // { x, y, w, h }
+      socket.broadcast.emit('EXPLOSION', data);
+    });
   // ...existing code...
 
   // Sync movesSlots from client
@@ -627,23 +632,50 @@ refreshSummaryCache();
           return;
         }
 
+        let hasVisual = false;
+        let visualEvents = [];
         for (let i = 0; i < data.update_names.length; i++) {
-          if (data.update_names[i].includes('stats')) {
-            players[data.id].statBlock.stats[data.update_names[i].split('stats.')[1]] =
-              data.update_values[i];
-          } else if (data.update_names[i].includes('statBlock')) {
-            console.log("statBlock update", data.update_names[i], data.update_values[i]);
-            players[data.id].statBlock[data.update_names[i].split('statBlock.')[1]] =
-              data.update_values[i];
+          const name = data.update_names[i];
+          const value = data.update_values[i];
+          if (name.includes('stats')) {
+            players[data.id].statBlock.stats[name.split('stats.')[1]] = value;
+          } else if (name.includes('statBlock')) {
+            players[data.id].statBlock[name.split('statBlock.')[1]] = value;
           } else {
-            players[data.id][data.update_names[i]] = data.update_values[i];
+            players[data.id][name] = value;
+            // Detect visual effect fields (add more as needed)
+            if (
+              name === 'forcefieldActive' ||
+              name === 'isDashing' ||
+              name === 'flashTimer' ||
+              name === 'particles' ||
+              name === 'meditateActive' ||
+              name === 'auraTimer' ||
+              name === 'dashTimer' ||
+              name === 'combustionActive'
+            ) {
+              hasVisual = true;
+              visualEvents.push({
+                playerId: data.id,
+                ability: name,
+                value: value
+              });
+            }
           }
         }
         players[data.id].pos = data.pos;
         players[data.id].holding = data.holding;
 
-        // Broadcast the updated value to other clients
-        socket.broadcast.emit('UPDATE_PLAYER', data);
+        // Broadcast visual effect changes to all clients, stat changes only to the player
+        if (hasVisual) {
+          io.emit('UPDATE_PLAYER', data);
+          // Also emit explicit visual event for all clients
+          for (const evt of visualEvents) {
+            io.emit('ABILITY_VISUAL', evt);
+          }
+        } else {
+          io.to(data.id).emit('UPDATE_PLAYER', data);
+        }
       }
 
       // Team management handlers
