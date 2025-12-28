@@ -20,6 +20,19 @@ class Map {
       this.chunks[x + ',' + y] = new Chunk(x, y);
       this.chunks[x + ',' + y].generate();
 
+      // Helper to get average player level from global players object
+      let avgPlayerLevel = 1;
+      try {
+        // 'players' is available via require cache (server.js sets globals.players)
+        const globals = require('../globals').getGlobals();
+        const players = globals.players;
+        const playerLevels = Object.values(players)
+          .map(p => (p && p.statBlock && typeof p.statBlock.level === 'number') ? p.statBlock.level : (p && typeof p.level === 'number' ? p.level : 1));
+        if (playerLevels.length > 0) {
+          avgPlayerLevel = Math.max(1, Math.floor(playerLevels.reduce((a, b) => a + b, 0) / playerLevels.length));
+        }
+      } catch (e) { avgPlayerLevel = 1; }
+
       // Spawn ants in all chunks (including 0,0)
       if (Math.random() < 0.5) {
         let ant = new Placeable(
@@ -36,7 +49,11 @@ class Map {
           100,
         );
         ant.brainID = Math.random() * 10000;
-        this.brains.push({ id: ant.brainID, target: null });
+        // Set ant level to at least avgPlayerLevel +- 10 at least 1
+        const minLevel = Math.max(1, avgPlayerLevel - 10);
+        const maxLevel = avgPlayerLevel + 10;
+        ant.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
+
         this.chunks[x + ',' + y].objects.push(ant);
       }
 
@@ -66,6 +83,11 @@ class Map {
         );
         entity.brainID = Math.random() * 10000;
         entity.race = choice.race;
+        // Set entity level to at least avgPlayerLevel
+        const minLevel = Math.max(1, avgPlayerLevel - 10);
+        const maxLevel = avgPlayerLevel + 10;
+        entity.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
+        
         this.brains.push({ id: entity.brainID, target: null });
         this.chunks[x + ',' + y].objects.push(entity);
       }

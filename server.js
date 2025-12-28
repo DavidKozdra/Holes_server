@@ -1263,18 +1263,35 @@ refreshSummaryCache();
       socket.on('new_proj', new_projectile);
 
       function new_projectile(data) {
-        //add projectiles to server map
+        // add projectiles to server map
+        // Compute cPos if missing
+        if (!data.cPos) {
+          const TILESIZE = serverMap.TILESIZE || 40;
+          const CHUNKSIZE = serverMap.CHUNKSIZE || 32;
+          const cx = Math.floor(data.x / (TILESIZE * CHUNKSIZE));
+          const cy = Math.floor(data.y / (TILESIZE * CHUNKSIZE));
+          data.cPos = { x: cx, y: cy };
+        }
         let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
-        chunk.projectiles.push(data);
+        if (chunk) {
+          chunk.projectiles.push(data);
+        }
         socket.broadcast.emit('NEW_PROJECTILE', data);
       }
 
       socket.on('delete_proj', delete_projectile);
 
       function delete_projectile(data) {
+        // Compute cPos if missing
+        if (!data.cPos) {
+          const TILESIZE = serverMap.TILESIZE || 40;
+          const CHUNKSIZE = serverMap.CHUNKSIZE || 32;
+          const cx = Math.floor(data.x / (TILESIZE * CHUNKSIZE));
+          const cy = Math.floor(data.y / (TILESIZE * CHUNKSIZE));
+          data.cPos = { x: cx, y: cy };
+        }
         let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
         if (!chunk) return;
-        
         for (let i = chunk.projectiles.length - 1; i >= 0; i--) {
           // Match by ID - most reliable identifier
           if (data.id == chunk.projectiles[i].id) {
