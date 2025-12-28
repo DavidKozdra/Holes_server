@@ -1,3 +1,24 @@
+
+function newConnection(socket) {
+  // ...existing code...
+
+  // Sync movesSlots from client
+  socket.on('update_moves', (data = {}) => {
+    console.log('[SERVER] update_moves received:', data);
+    const p = players[socket.id] || {};
+    if (Array.isArray(data.movesSlots)) {
+      p.movesSlots = data.movesSlots;
+      console.log('[SERVER] Moves set saved for player:', p.name, p.movesSlots);
+    }
+    // Persist to snapshot
+    if (p.name) {
+      savePlayerSnapshot(p);
+    }
+    io.to(socket.id).emit('PLAYER_MOVES_SAVED', { ok: true });
+  });
+
+  // ...existing code...
+}
 const express = require('express');
 const socket = require('socket.io');
 const cors = require('cors');
@@ -70,6 +91,7 @@ function savePlayerSnapshot(player) {
           legs: "",
           feet: "",
         },
+        movesSlots: Array.isArray(player.movesSlots) ? player.movesSlots.slice() : undefined
       }
     : null;
 
@@ -449,12 +471,14 @@ refreshSummaryCache();
             if (statBlockToSend && statBlockToSend.stats && typeof snap.race === 'number') {
               statBlockToSend.stats = ensureCompleteStats(statBlockToSend.stats, snap.race);
             }
+            console.log('[SERVER] Sending moves set to client:', Array.isArray(snap.movesSlots) ? snap.movesSlots : null);
             io.to(socket.id).emit('receive_my_items', {
               hasOldItems: true, // Changed: always true if snapshot exists
-              invBlock: snap.invBlock ? JSON.parse(JSON.stringify(snap.invBlock)) : { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: {} },
+              invBlock: snap.invBlock ? JSON.parse(JSON.stringify(snap.invBlock)) : { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: {}, movesSlots: [] },
               statBlock: statBlockToSend,
               pos: snap.pos ? { x: snap.pos.x, y: snap.pos.y } : null,
               teamId: snap.teamId || null,
+              movesSlots: Array.isArray(snap.invBlock?.movesSlots) ? snap.invBlock.movesSlots : null,
             });
           } catch (e) {
             console.warn('[Items] Failed to restore items for', playerName, e);
@@ -513,6 +537,7 @@ refreshSummaryCache();
         if (data.race !== undefined) p.race = data.race;
         if (data.color !== undefined) p.color = data.color;
         if (data.name) p.name = data.name;
+        if (Array.isArray(data.movesSlots)) p.movesSlots = data.movesSlots;
 
         // Ensure the players table has this socket
         if (!players[socket.id] && p.name) {
@@ -1674,7 +1699,7 @@ function ensureItemBagSchema(bag) {
 
 function mergeAllChunkBags() {
   // Only merge when bags are extremely close (about 1.5 tiles)
-  const MERGE_DISTANCE = TILESIZE * 3.5;
+  const MERGE_DISTANCE = TILESIZE * 5.5;
 
   for (const key in serverMap.chunks) {
     const chunk = serverMap.chunks[key];
