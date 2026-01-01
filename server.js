@@ -606,6 +606,7 @@ refreshSummaryCache();
             kills: players[socket.id].kills,
             deaths: players[socket.id].deaths,
           };
+          
           // Save snapshot by player name before removal
           const p = players[socket.id];
           if (p && p.name) {
@@ -619,6 +620,14 @@ refreshSummaryCache();
         delete players[socket.id];
 
         io.emit('REMOVE_PLAYER', socket.id);
+        // send message
+        io.emit('NEW_CHAT_MESSAGE', {
+          message: `Goodbye ${players[socket.id] ? players[socket.id].name : 'a player'}`,
+          x: 0,
+          y: 0,
+          user: players[socket.id] ? players[socket.id].name : 'a player'
+        });
+
       }
 
       socket.on('update_pos', update_pos);
