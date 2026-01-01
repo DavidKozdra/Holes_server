@@ -584,6 +584,29 @@ refreshSummaryCache();
         io.emit('TEAMS_UPDATE', { teams });
       }
 
+      // Handle explicit player leave message
+      socket.on('player_leave', (data) => {
+        try { logger.info('Player leaving', { id: socket.id, playerName: data.playerName }); } catch {}
+        console.log(`[LEAVE] Player "${data.playerName}" (${socket.id}) is leaving`);
+        
+        // Clean up player state immediately
+        if (players[socket.id] != undefined) {
+          const p = players[socket.id];
+          if (p && p.name) {
+            // Save player snapshot before removal
+            const ok = savePlayerSnapshot(p);
+            console.log(ok ? `[SAVE] ✓ Snapshot saved for "${p.name}"` : `[SAVE] ✗ Snapshot failed for "${p.name}"`);
+          }
+          players[socket.id] = [];
+          delete players[socket.id];
+        }
+        
+        // Notify all clients about the player leaving
+        io.emit('PLAYERS_CHECK', {
+          ids: Object.keys(players),
+        });
+      });
+
       socket.on('disconnect', disconnect);
 
       function disconnect(data) {
