@@ -983,6 +983,38 @@ refreshSummaryCache();
         }
       }
 
+      // Spawn entity handler (e.g., for Queen's Kiss ability)
+      socket.on('spawn_entity', (data) => {
+        const { name, x, y, teamId, color, ownerName } = data;
+        const playerData = players[socket.id];
+        
+        if (!playerData || !name || x === undefined || y === undefined) {
+          console.error('Invalid spawn_entity data:', data);
+          return;
+        }
+
+        // Generate unique brain ID for the entity
+        const brainID = Math.floor(Math.random() * 1000000).toString();
+        
+        // Create brain object for AI control
+        const brain = {
+          id: brainID,
+          target: { x, y },
+          personality: 'swarm', // Ants use swarm AI
+          teamId: teamId || null,
+          ownerName: ownerName || playerData.name
+        };
+        
+        // Add to server map brains
+        if (!serverMap.brains) serverMap.brains = [];
+        serverMap.brains.push(brain);
+        
+        // Broadcast to all clients to spawn the entity
+        io.emit('NEW_BRAIN', brain);
+        
+        console.log(`[Spawn Entity] ${ownerName} spawned ${name} at (${x}, ${y})`);
+      });
+
       // Team management handlers
       socket.on('create_team', (data) => {
         const { name, color } = data;
