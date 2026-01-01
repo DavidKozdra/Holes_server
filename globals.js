@@ -4,7 +4,7 @@ const { Map } = require('./utils/map');
 const state = {
   players: {},
   traps: {},
-  serverMap: new Map(Math.random()),
+  serverMap: null,
   chatMessages: [
     {
       message: 'Hello, welcome to the chat!',
@@ -23,5 +23,8 @@ const state = {
 function getGlobals() {
   return state;
 }
+
+// Initialize serverMap after getGlobals is defined to pass the callback (avoids circular require)
+state.serverMap = new Map(Math.random(), getGlobals);
 
 module.exports = { getGlobals };

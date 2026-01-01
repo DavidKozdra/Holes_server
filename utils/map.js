@@ -6,11 +6,12 @@ const TILESIZE = 32;
 const CHUNKSIZE = 50;
 
 class Map {
-  constructor(seed) {
+  constructor(seed, getGlobalsFn) {
     noise2D = createNoise2D(alea(seed));
     this.seed = seed;
     this.chunks = {}; //referance with a string "x,y"     {ex. chunks["0,0"]}
     this.brains = [];
+    this.getGlobals = typeof getGlobalsFn === 'function' ? getGlobalsFn : null;
     this.getChunk(0, 0);
   }
 
@@ -20,12 +21,11 @@ class Map {
       this.chunks[x + ',' + y] = new Chunk(x, y);
       this.chunks[x + ',' + y].generate();
 
-      // Helper to get average player level from global players object
+      // Helper to get average player level from global players object (injected to avoid circular require)
       let avgPlayerLevel = 1;
       try {
-        // 'players' is available via require cache (server.js sets globals.players)
-        const globals = require('../globals').getGlobals();
-        const players = globals.players;
+        const globals = this.getGlobals ? this.getGlobals() : null;
+        const players = globals?.players || {};
         const playerLevels = Object.values(players)
           .map(p => (p && p.statBlock && typeof p.statBlock.level === 'number') ? p.statBlock.level : (p && typeof p.level === 'number' ? p.level : 1));
         if (playerLevels.length > 0) {
