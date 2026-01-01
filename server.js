@@ -772,6 +772,11 @@ refreshSummaryCache();
         playerData.color = { r: team.color.r, g: team.color.g, b: team.color.b };
 
         io.emit('TEAMS_UPDATE', { teams });
+        // Broadcast player color update to all clients
+        io.emit('PLAYER_COLOR_CHANGED', { 
+          playerId: playerSocketId, 
+          color: playerData.color 
+        });
         io.to(playerSocketId).emit('TEAM_JOINED', { teamId, team });
       });
 
@@ -825,6 +830,11 @@ refreshSummaryCache();
         }
 
         io.emit('TEAMS_UPDATE', { teams });
+        // Broadcast player color update to all clients
+        io.emit('PLAYER_COLOR_CHANGED', { 
+          playerId: socket.id, 
+          color: playerData.color 
+        });
         socket.emit('TEAM_LEFT', { teamId });
       });
 
