@@ -417,6 +417,9 @@ refreshSummaryCache();
         players[data.id] = data;
 
         socket.broadcast.emit('NEW_PLAYER', data);
+        // Send team data to the joining player and all clients
+        io.emit('TEAMS_UPDATE', { teams });
+        
         try { logger.info('Player joined', { id: data.id, name: data.name }); } catch {}
 
         const isReturning = !!snap;
@@ -517,6 +520,9 @@ refreshSummaryCache();
         if (data.statBlock) {
           players[socket.id].statBlock = data.statBlock;
         }
+        
+        // Save player snapshot with updated inventory
+        savePlayerSnapshot(players[socket.id]);
         
         console.log(`[Sync] Updated inventory for "${players[socket.id].name}" - ${Object.keys(data.invBlock?.items || {}).length} items`);
       });
@@ -712,6 +718,12 @@ refreshSummaryCache();
         io.emit('TEAM_CREATED', { teamId, team: teams[teamId] });
         io.emit('TEAMS_UPDATE', { teams });
         
+        // Save team data to disk
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        
+        // Save player snapshot with team
+        savePlayerSnapshot(playerData);
+        
         socket.emit('TEAM_JOINED', { teamId, team: teams[teamId] });
       });
 
@@ -734,6 +746,9 @@ refreshSummaryCache();
         }
 
         teams[teamId].requests.push(playerData.name);
+        
+        // Save team changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
         
         // Notify team creator (find their socket ID by name)
         const creatorSocketId = Object.keys(players).find(id => players[id].name === teams[teamId].creator);
@@ -771,6 +786,10 @@ refreshSummaryCache();
         // Set player color to team color
         playerData.color = { r: team.color.r, g: team.color.g, b: team.color.b };
 
+        // Save all changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        savePlayerSnapshot(playerData);
+
         io.emit('TEAMS_UPDATE', { teams });
         // Broadcast player color update to all clients
         io.emit('PLAYER_COLOR_CHANGED', { 
@@ -793,6 +812,9 @@ refreshSummaryCache();
 
         // Remove from requests
         team.requests = team.requests.filter(name => name !== playerName);
+        
+        // Save changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
         
         if (playerSocketId) {
           io.to(playerSocketId).emit('TEAM_REQUEST_DENIED', { teamId });
@@ -823,11 +845,16 @@ refreshSummaryCache();
             if (memberSocketId) {
               players[memberSocketId].teamId = null;
               players[memberSocketId].color = 0;
+              savePlayerSnapshot(players[memberSocketId]);
               io.to(memberSocketId).emit('TEAM_DISBANDED', { teamId });
             }
           });
           delete teams[teamId];
         }
+
+        // Save all changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        savePlayerSnapshot(playerData);
 
         io.emit('TEAMS_UPDATE', { teams });
         // Broadcast player color update to all clients
@@ -859,9 +886,13 @@ refreshSummaryCache();
             const memberSocketId = Object.keys(players).find(id => players[id].name === memberName);
             if (memberSocketId && players[memberSocketId]) {
               players[memberSocketId].color = { r: color.r, g: color.g, b: color.b };
+              savePlayerSnapshot(players[memberSocketId]);
             }
           });
         }
+
+        // Save all changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
 
         io.emit('TEAMS_UPDATE', { teams });
       });
@@ -894,6 +925,9 @@ refreshSummaryCache();
           team.leaders.push(memberName);
         }
 
+        // Save changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+
         io.emit('TEAMS_UPDATE', { teams });
       });
 
@@ -925,10 +959,83 @@ refreshSummaryCache();
         if (memberData && memberSocketId) {
           memberData.teamId = null;
           memberData.color = 0;
+          savePlayerSnapshot(memberData);
           io.to(memberSocketId).emit('TEAM_MEMBER_REMOVED', { teamId });
         }
 
+        // Save changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+
         io.emit('TEAMS_UPDATE', { teams });
+      });
+
+      socket.on('invite_player', (data) => {
+        const { teamId, invitedPlayerName } = data;
+        const team = teams[teamId];
+        const requesterData = players[socket.id];
+        const invitedPlayerSocketId = Object.keys(players).find(id => players[id].name === invitedPlayerName);
+        const invitedPlayer = invitedPlayerSocketId ? players[invitedPlayerSocketId] : null;
+        
+        if (!team || !requesterData || !invitedPlayerName || !invitedPlayer) return;
+        
+        // Check if requester is a leader
+        if (!team.leaders.includes(requesterData.name)) {
+          socket.emit('TEAM_ERROR', { message: 'Only team leaders can invite players.' });
+          return;
+        }
+
+        // Check if invited player is already in a team
+        if (invitedPlayer.teamId) {
+          socket.emit('TEAM_ERROR', { message: 'That player is already in a team.' });
+          return;
+        }
+
+        // Send invite prompt to the invited player
+        io.to(invitedPlayerSocketId).emit('TEAM_INVITE', {
+          teamId: teamId,
+          teamName: team.name,
+          inviterName: requesterData.name
+        });
+
+        socket.emit('TEAM_INVITE_SENT', { playerName: invitedPlayerName });
+      });
+
+      socket.on('accept_invite', (data) => {
+        const { teamId } = data;
+        const playerData = players[socket.id];
+        const team = teams[teamId];
+
+        if (!playerData || !playerData.name || !team) return;
+
+        // Check if player is already in a team
+        if (playerData.teamId) {
+          socket.emit('TEAM_ERROR', { message: 'You are already in a team.' });
+          return;
+        }
+
+        // Add to members
+        team.members.push(playerData.name);
+        playerData.teamId = teamId;
+        // Set player color to team color
+        playerData.color = { r: team.color.r, g: team.color.g, b: team.color.b };
+
+        // Save all changes
+        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        savePlayerSnapshot(playerData);
+
+        io.emit('TEAMS_UPDATE', { teams });
+        // Broadcast player color update to all clients
+        io.emit('PLAYER_COLOR_CHANGED', { 
+          playerId: socket.id, 
+          color: playerData.color 
+        });
+        socket.emit('TEAM_JOINED', { teamId, team });
+      });
+
+      socket.on('decline_invite', (data) => {
+        const { teamId } = data;
+        // Just emit a confirmation to the player
+        socket.emit('TEAM_INVITE_DECLINED', { teamId });
       });
 
       socket.on('update_node', update_node);
