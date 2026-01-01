@@ -971,7 +971,8 @@ refreshSummaryCache();
           update_values: data.update_values
         };
 
-        // Broadcast visual effect changes to all clients, stat changes only to the player
+        // Always broadcast position/holding to all clients for smooth movement
+        // Broadcast visual effects and position to everyone
         if (hasVisual) {
           io.emit('UPDATE_PLAYER', normalizedData);
           // Also emit explicit visual event for all clients
@@ -979,7 +980,13 @@ refreshSummaryCache();
             io.emit('ABILITY_VISUAL', evt);
           }
         } else {
-          io.to(data.id).emit('UPDATE_PLAYER', normalizedData);
+          // Broadcast position to all clients, stats only to the player
+          if (data.pos || data.holding) {
+            io.emit('UPDATE_PLAYER', normalizedData);
+          } else {
+            // Only stat updates, send just to the player
+            io.to(data.id).emit('UPDATE_PLAYER', normalizedData);
+          }
         }
       }
 
