@@ -1,14 +1,66 @@
 const fs = require('fs');
 const path = require('path');
+const fsp = fs.promises;
 
 const SAVE_PATH = path.join(__dirname, '..', 'data', 'world.json');
 const WORLDS_DIR = path.join(__dirname, '..', 'data', 'worlds');
+
+// Async save queue to avoid blocking the event loop with full JSON writes
+let pendingPayload = null;
+let flushScheduled = false;
+let isFlushing = false;
+const waiters = [];
 
 function ensureDir() {
   const dir = path.dirname(SAVE_PATH);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+}
+
+async function writePayload(payload) {
+  await ensureDir();
+  const tmpPath = `${SAVE_PATH}.tmp`;
+  await fsp.writeFile(tmpPath, JSON.stringify(payload));
+  await fsp.rename(tmpPath, SAVE_PATH);
+}
+
+function scheduleFlush() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  setImmediate(async () => {
+    flushScheduled = false;
+    if (isFlushing || !pendingPayload) return;
+    isFlushing = true;
+    const payload = pendingPayload;
+    pendingPayload = null;
+
+    try {
+      await writePayload(payload);
+      while (waiters.length) {
+        const { resolve } = waiters.shift();
+        resolve(true);
+      }
+    } catch (e) {
+      console.error('Error saving world state (async queue):', e);
+      while (waiters.length) {
+        const { reject } = waiters.shift();
+        reject(e);
+      }
+    } finally {
+      isFlushing = false;
+      if (pendingPayload) scheduleFlush();
+    }
+  });
+}
+
+function enqueueSave(payload) {
+  // Keep only the latest payload; persistence is snapshot-based
+  pendingPayload = payload;
+  return new Promise((resolve, reject) => {
+    waiters.push({ resolve, reject });
+    scheduleFlush();
+  });
 }
 
 function clearState() {
@@ -83,21 +135,16 @@ function serializePlayersSnapshot(players) {
 }
 
 function saveState({ players, serverMap, chatMessages, teams, playersSnapshot }) {
-  try {
-    ensureDir();
-    const payload = {
-      savedAt: Date.now(),
-      playersSnapshot: playersSnapshot || serializePlayersSnapshot(players),
-      serverMap: serializeServerMap(serverMap),
-      chatMessages: chatMessages || [],
-      teams: teams || {},
-    };
-    fs.writeFileSync(SAVE_PATH, JSON.stringify(payload));
-    return true;
-  } catch (e) {
-    console.error('Error saving world state:', e);
-    return false;
-  }
+  const payload = {
+    savedAt: Date.now(),
+    playersSnapshot: playersSnapshot || serializePlayersSnapshot(players),
+    serverMap: serializeServerMap(serverMap),
+    chatMessages: chatMessages || [],
+    teams: teams || {},
+  };
+  // Fire-and-forget compatibility: callers still get a truthy value, while we enqueue async write
+  enqueueSave(payload).catch(() => {});
+  return true;
 }
 
 function loadState() {
@@ -112,4 +159,4 @@ function loadState() {
   }
 }
 
-module.exports = { saveState, loadState, clearState };
+module.exports = { saveState, loadState, clearState, enqueueSave };

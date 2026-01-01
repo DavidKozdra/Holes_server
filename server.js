@@ -28,8 +28,8 @@ const express = require('express');
 const socket = require('socket.io');
 const cors = require('cors');
 const { validColors } = require('./utils/color');
-const { Map, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
-const { saveState, loadState, clearState } = require('./utils/persistence');
+const { Map: GameMap, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
+const { loadState, clearState, enqueueSave } = require('./utils/persistence');
 const { logger, DATA_DIR } = require('./utils/logger');
 const fs = require('fs');
 const { getGlobals } = require('./globals'); // Ensure correct import
@@ -41,6 +41,89 @@ var kills_deaths = {};
 let savedPlayersByName = {};
 let summaryCache = globals.summaryCache;
 let playerSnapshotCache = globals.playerSnapshotCache;
+
+// Async save tuning
+const PLAYER_SAVE_DEBOUNCE_MS = parseInt(process.env.PLAYER_SAVE_DEBOUNCE_MS || '400', 10);
+const pendingPlayerSaveTimers = new Map();
+
+function queueWorldSave(reason = 'unspecified') {
+  return enqueueSave({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName })
+    .catch((e) => {
+      console.error(`[Persistence] Async save failed (${reason}):`, e);
+      return false;
+    });
+}
+
+function schedulePlayerSnapshotPersist(playerName) {
+  if (!playerName) return;
+  const existing = pendingPlayerSaveTimers.get(playerName);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    pendingPlayerSaveTimers.delete(playerName);
+    queueWorldSave('player-snapshot');
+  }, PLAYER_SAVE_DEBOUNCE_MS);
+  pendingPlayerSaveTimers.set(playerName, timer);
+}
+
+const chunkRoom = (cx, cy) => `chunk_${cx}_${cy}`;
+const socketChunkRooms = new Map();
+
+function chunkCoordsFromPos(pos) {
+  if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return null;
+  const cx = Math.floor(pos.x / (TILESIZE * CHUNKSIZE));
+  const cy = Math.floor(pos.y / (TILESIZE * CHUNKSIZE));
+  return { cx, cy };
+}
+
+function moveSocketToChunkRoom(socket, coords) {
+  if (!socket || !coords) return;
+  const room = chunkRoom(coords.cx, coords.cy);
+  const current = socketChunkRooms.get(socket.id);
+  if (current === room) return;
+  if (current) socket.leave(current);
+  socket.join(room);
+  socketChunkRooms.set(socket.id, room);
+}
+
+const NODE_FLUSH_INTERVAL_MS = 75;
+const chunkNodeBuffers = new Map();
+const chunkIronBuffers = new Map();
+let nodeFlushTimer = null;
+
+const BAG_MERGE_INTERVAL_MS = 150;
+const BAG_MERGE_BUDGET = 25;
+
+function scheduleNodeFlush() {
+  if (nodeFlushTimer) return;
+  nodeFlushTimer = setTimeout(() => {
+    nodeFlushTimer = null;
+    flushNodeBuffers();
+  }, NODE_FLUSH_INTERVAL_MS);
+}
+
+function bufferNodeUpdate(cx, cy, payload, isIron) {
+  const target = isIron ? chunkIronBuffers : chunkNodeBuffers;
+  const key = `${cx},${cy}`;
+  const list = target.get(key) || [];
+  list.push(payload);
+  target.set(key, list);
+  scheduleNodeFlush();
+}
+
+function flushNodeBuffers() {
+  const flush = (map, eventName) => {
+    for (const [key, updates] of map.entries()) {
+      map.delete(key);
+      const [cx, cy] = key.split(',').map((n) => parseInt(n, 10));
+      const room = chunkRoom(cx, cy);
+      for (const payload of updates) {
+        io.to(room).emit(eventName, payload);
+      }
+    }
+  };
+  flush(chunkNodeBuffers, 'UPDATE_NODE');
+  flush(chunkIronBuffers, 'UPDATE_IRON_NODE');
+}
 
 // Base stats for each race - must match client-side
 const BASE_STATS = [
@@ -111,10 +194,7 @@ function savePlayerSnapshot(player) {
     teamId: player.teamId || null,
   };
 
-  try {
-    saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName });
-  } catch {}
-
+  schedulePlayerSnapshotPersist(player.name);
   return true;
 }
 
@@ -123,9 +203,7 @@ function deletePlayerSnapshotByName(playerName) {
   if (!playerName) return false;
   if (!savedPlayersByName[playerName]) return false;
   delete savedPlayersByName[playerName];
-  try {
-    saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName });
-  } catch {}
+  schedulePlayerSnapshotPersist(playerName);
   return true;
 }
 
@@ -223,7 +301,7 @@ app.use(allRoutes);
     if (loaded && loaded.serverMap) {
       // Reconstruct serverMap from saved data
       const seed = loaded.serverMap.seed || Math.random();
-      serverMap = new Map(seed);
+      serverMap = new GameMap(seed);
 
       const keys = Object.keys(loaded.serverMap.chunks || {});
       for (let i = 0; i < keys.length; i++) {
@@ -260,10 +338,11 @@ app.use(allRoutes);
 
 // Periodic autosave
 setInterval(() => {
-  const ok = saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName });
-  if (ok) {
-    console.log('[Persistence] Autosaved world state');
-  }
+  queueWorldSave('autosave').then((ok) => {
+    if (ok !== false) {
+      console.log('[Persistence] Autosaved world state');
+    }
+  });
 }, Math.max(0.1, SAVE_INTERVAL_HOURS) * 60 * 60 * 1000);
 
 // Periodic summary snapshot cache for quick client consumption
@@ -295,7 +374,7 @@ refreshSummaryCache();
 ['SIGINT', 'SIGTERM'].forEach((sig) => {
   process.on(sig, () => {
     console.log(`[Persistence] Received ${sig}, saving world state...`);
-    try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+    queueWorldSave('cli-delete');
     process.exit(0);
   });
 });
@@ -655,6 +734,7 @@ refreshSummaryCache();
 
         players[socket.id] = [];
         delete players[socket.id];
+        socketChunkRooms.delete(socket.id);
 
         io.emit('REMOVE_PLAYER', socket.id);
         // send message
@@ -678,8 +758,15 @@ refreshSummaryCache();
         players[data.id].pos = data.pos;
         players[data.id].holding = data.holding;
 
+        const coords = chunkCoordsFromPos(data.pos);
+        moveSocketToChunkRoom(socket, coords);
+
         // Broadcast the updated position to other clients
-        socket.broadcast.emit('UPDATE_POS', data);
+        if (coords) {
+          socket.to(chunkRoom(coords.cx, coords.cy)).emit('UPDATE_POS', data);
+        } else {
+          socket.broadcast.emit('UPDATE_POS', data);
+        }
       }
 
       socket.on('update_player', update_player);
@@ -765,7 +852,7 @@ refreshSummaryCache();
         io.emit('TEAMS_UPDATE', { teams });
         
         // Save team data to disk
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-create');
         
         // Save player snapshot with team
         savePlayerSnapshot(playerData);
@@ -794,7 +881,7 @@ refreshSummaryCache();
         teams[teamId].requests.push(playerData.name);
         
         // Save team changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-request');
         
         // Notify team creator (find their socket ID by name)
         const creatorSocketId = Object.keys(players).find(id => players[id].name === teams[teamId].creator);
@@ -833,7 +920,7 @@ refreshSummaryCache();
         playerData.color = { r: team.color.r, g: team.color.g, b: team.color.b };
 
         // Save all changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-accept');
         savePlayerSnapshot(playerData);
 
         io.emit('TEAMS_UPDATE', { teams });
@@ -860,7 +947,7 @@ refreshSummaryCache();
         team.requests = team.requests.filter(name => name !== playerName);
         
         // Save changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-deny');
         
         if (playerSocketId) {
           io.to(playerSocketId).emit('TEAM_REQUEST_DENIED', { teamId });
@@ -899,7 +986,7 @@ refreshSummaryCache();
         }
 
         // Save all changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-leave');
         savePlayerSnapshot(playerData);
 
         io.emit('TEAMS_UPDATE', { teams });
@@ -938,7 +1025,7 @@ refreshSummaryCache();
         }
 
         // Save all changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-update');
 
         io.emit('TEAMS_UPDATE', { teams });
       });
@@ -972,7 +1059,7 @@ refreshSummaryCache();
         }
 
         // Save changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-promote');
 
         io.emit('TEAMS_UPDATE', { teams });
       });
@@ -1010,7 +1097,7 @@ refreshSummaryCache();
         }
 
         // Save changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-remove');
 
         io.emit('TEAMS_UPDATE', { teams });
       });
@@ -1066,7 +1153,7 @@ refreshSummaryCache();
         playerData.color = { r: team.color.r, g: team.color.g, b: team.color.b };
 
         // Save all changes
-        try { saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName }); } catch {}
+        queueWorldSave('team-accept-invite');
         savePlayerSnapshot(playerData);
 
         io.emit('TEAMS_UPDATE', { teams });
@@ -1106,7 +1193,7 @@ refreshSummaryCache();
           }
         }
 
-        io.emit('UPDATE_NODE', data);
+        bufferNodeUpdate(chunkPos[0], chunkPos[1], data, false);
       }
 
       socket.on('update_iron_node', update_iron_node);
@@ -1131,7 +1218,7 @@ refreshSummaryCache();
           }
         }
 
-        io.emit('UPDATE_IRON_NODE', data);
+        bufferNodeUpdate(chunkPos[0], chunkPos[1], data, true);
       }
 
       socket.on('update_nodes', update_nodes);
@@ -1218,7 +1305,7 @@ refreshSummaryCache();
           }
         }
 
-        io.emit('UPDATE_NODES', data);
+        io.to(chunkRoom(data.cx, data.cy)).emit('UPDATE_NODES', data);
       }
 
       socket.on('update_iron_nodes', update_iron_nodes);
@@ -1338,7 +1425,7 @@ refreshSummaryCache();
             obj: itemBag,
           });
         }
-        io.emit('UPDATE_IRON_NODES', data);
+        io.to(chunkRoom(data.cx, data.cy)).emit('UPDATE_IRON_NODES', data);
       }
 
       socket.on('new_object', new_object);
@@ -1426,7 +1513,7 @@ refreshSummaryCache();
           }
         }
 
-        mergeAllChunkBags();
+        mergeAllChunkBags(BAG_MERGE_BUDGET);
       }
 
       socket.on('update_obj', update_obj);
@@ -1605,6 +1692,7 @@ refreshSummaryCache();
         let pos = data.split(',');
         pos[0] = parseInt(pos[0]);
         pos[1] = parseInt(pos[1]);
+        socket.join(chunkRoom(pos[0], pos[1]));
         let chunk = serverMap.getChunk(pos[0], pos[1]);
         let tempData = {};
         for (let x = 0; x < CHUNKSIZE; x++) {
@@ -1821,7 +1909,9 @@ setInterval(() => {
       
       // Broadcast update to all clients
       if (updated) {
-        io.emit('UPDATE_PLAYER', {
+        const coords = chunkCoordsFromPos(p.pos);
+        const target = coords ? io.to(chunkRoom(coords.cx, coords.cy)) : io;
+        target.emit('UPDATE_PLAYER', {
           id: id,
           pos: p.pos,
           holding: p.holding,
@@ -1837,6 +1927,7 @@ setInterval(() => {
     //console.log("heal plants");
     //get the keys of the serverMap chunks
     let keys = Object.keys(serverMap.chunks);
+    const healedRooms = new Set();
     // Loop through each chunk
     for (let i = 0; i < keys.length; i++) {
       let chunk = serverMap.chunks[keys[i]];
@@ -1852,11 +1943,14 @@ setInterval(() => {
             if (chunk.objects[j].hp > chunk.objects[j].mhp) {
               chunk.objects[j].hp = chunk.objects[j].mhp; // Cap the HP at max HP
             }
+            healedRooms.add(chunkRoom(chunk.cx, chunk.cy));
           }
         }
       }
     }
-    io.emit('HEAL_PLANTS', {});
+    for (const room of healedRooms) {
+      io.to(room).emit('HEAL_PLANTS', {});
+    }
   }
 
   // Grant XP to all entities every minute
@@ -1882,7 +1976,7 @@ setInterval(() => {
           }
           
           // Broadcast entity level update
-          io.emit('ENTITY_LEVEL_UPDATE', {
+          io.to(chunkRoom(chunk.cx, chunk.cy)).emit('ENTITY_LEVEL_UPDATE', {
             cx: chunk.cx,
             cy: chunk.cy,
             objPos: obj.pos,
@@ -1946,7 +2040,7 @@ setInterval(() => {
       Object.keys(teams).forEach((id) => delete teams[id]);
 
       // Start a fresh map and reset round timer if applicable
-      serverMap = new Map(Math.random());
+      serverMap = new GameMap(Math.random());
       countdown = 15 * 60;
       timerEndAt = Date.now() + countdown * 1000;
 
@@ -2009,123 +2103,128 @@ function ensureItemBagSchema(bag) {
   return bag;
 }
 
-function mergeAllChunkBags() {
+function mergeAllChunkBags(maxMerges = Infinity) {
   // Only merge when bags are extremely close (about 1.5 tiles)
   const MERGE_DISTANCE = TILESIZE * 5.5;
+  const CELL = MERGE_DISTANCE; // spatial hash cell size
+  let mergesLeft = maxMerges;
 
-  for (const key in serverMap.chunks) {
+  outer: for (const key in serverMap.chunks) {
     const chunk = serverMap.chunks[key];
-    if (!chunk || !Array.isArray(chunk.objects)) continue;
+    if (!chunk || !Array.isArray(chunk.objects) || chunk.objects.length < 2) continue;
 
-    // Derive cx/cy for emits (fallback to key if missing on chunk)
-    let cx = typeof chunk.cx === 'number' ? chunk.cx : undefined;
-    let cy = typeof chunk.cy === 'number' ? chunk.cy : undefined;
-    if (cx === undefined || cy === undefined) {
-      const [kx, ky] = key.split(',').map((n) => parseInt(n, 10));
-      if (!Number.isNaN(kx) && !Number.isNaN(ky)) {
-        cx = kx;
-        cy = ky;
+    const roomCx = typeof chunk.cx === 'number' ? chunk.cx : parseInt(key.split(',')[0], 10);
+    const roomCy = typeof chunk.cy === 'number' ? chunk.cy : parseInt(key.split(',')[1], 10);
+    const room = chunkRoom(roomCx, roomCy);
+
+    // Normalize and collect bags
+    const bags = [];
+    for (let idx = 0; idx < chunk.objects.length; idx++) {
+      let bag = chunk.objects[idx];
+      if (!bag || bag.type !== 'InvObj' || bag.objName !== 'ItemBag') continue;
+      bag = ensureItemBagSchema(bag);
+      if (!bag) {
+        const removed = chunk.objects.splice(idx, 1)[0];
+        io.to(room).emit('DELETE_OBJ', {
+          cx: roomCx,
+          cy: roomCy,
+          objName: removed?.objName || 'ItemBag',
+          pos: removed?.pos || { x: 0, y: 0 },
+          z: removed?.z ?? 0,
+        });
+        idx--;
+        continue;
       }
+      chunk.objects[idx] = bag;
+      bags.push({ bag, idx });
     }
 
-    let mergedSomething = true;
-    while (mergedSomething) {
-      mergedSomething = false;
+    if (bags.length < 2) continue;
 
-      for (let i = 0; i < chunk.objects.length; i++) {
-        let bagA = chunk.objects[i];
-        if (!bagA || bagA.type !== 'InvObj' || bagA.objName !== 'ItemBag') continue;
+    const cellKey = (x, y) => `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
+    const cellMap = new Map();
+    for (const entry of bags) {
+      const key = cellKey(entry.bag.pos.x, entry.bag.pos.y);
+      const list = cellMap.get(key) || [];
+      list.push(entry);
+      cellMap.set(key, list);
+    }
 
-        bagA = ensureItemBagSchema(bagA);
-        if (!bagA) {
-          // If schema can't be ensured, delete this bad bag
-          const removed = chunk.objects.splice(i, 1)[0];
-          io.emit('DELETE_OBJ', {
-            cx, cy,
-            objName: removed?.objName || 'ItemBag',
-            pos: removed?.pos || { x: 0, y: 0 },
-            z: removed?.z ?? 0,
-          });
-          i--; // stay at same index
-          continue;
-        }
-        // replace in array in case we normalized fields
-        chunk.objects[i] = bagA;
+    const toRemove = new Set();
+    const dirtyBags = new Set();
 
-        for (let j = i + 1; j < chunk.objects.length; j++) {
-          let bagB = chunk.objects[j];
-          if (!bagB || bagB.type !== 'InvObj' || bagB.objName !== 'ItemBag') continue;
+    for (const entry of bags) {
+      if (mergesLeft <= 0) break outer;
+      if (toRemove.has(entry.idx)) continue;
+      const a = entry.bag;
+      const baseCellX = Math.floor(a.pos.x / CELL);
+      const baseCellY = Math.floor(a.pos.y / CELL);
 
-          bagB = ensureItemBagSchema(bagB);
-          if (!bagB) {
-            // Just remove invalid bagB
-            const removed = chunk.objects.splice(j, 1)[0];
-            io.emit('DELETE_OBJ', {
-              cx, cy,
-              objName: removed?.objName || 'ItemBag',
-              pos: removed?.pos || { x: 0, y: 0 },
-              z: removed?.z ?? 0,
-            });
-            j--; // continue at same j index after splice
-            continue;
-          }
-          chunk.objects[j] = bagB;
+      for (let dx = -1; dx <= 1 && mergesLeft > 0; dx++) {
+        for (let dy = -1; dy <= 1 && mergesLeft > 0; dy++) {
+          const list = cellMap.get(`${baseCellX + dx},${baseCellY + dy}`);
+          if (!list) continue;
+          for (const other of list) {
+            if (other.idx === entry.idx || toRemove.has(other.idx) || mergesLeft <= 0) continue;
+            const b = other.bag;
+            const dist = Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y);
+            if (dist > MERGE_DISTANCE) continue;
 
-          const dx = bagA.pos.x - bagB.pos.x;
-          const dy = bagA.pos.y - bagB.pos.y;
-          const dist = Math.hypot(dx, dy);
-
-          if (dist <= MERGE_DISTANCE) {
-            // Merge B into A (sum amounts per key)
-            for (const item of Object.keys(bagB.invBlock.items)) {
-              const bAmt = bagB.invBlock.items[item]?.amount || 0;
-              if (!bagA.invBlock.items[item]) bagA.invBlock.items[item] = { amount: 0 };
-              bagA.invBlock.items[item].amount += bAmt;
+            for (const item of Object.keys(b.invBlock.items)) {
+              const bAmt = b.invBlock.items[item]?.amount || 0;
+              if (!a.invBlock.items[item]) a.invBlock.items[item] = { amount: 0 };
+              a.invBlock.items[item].amount += bAmt;
             }
 
-            // Remove empty items if any ended up <= 0
-            for (const k of Object.keys(bagA.invBlock.items)) {
-              if (!Number.isFinite(bagA.invBlock.items[k].amount) || bagA.invBlock.items[k].amount <= 0) {
-                delete bagA.invBlock.items[k];
+            for (const k of Object.keys(a.invBlock.items)) {
+              if (!Number.isFinite(a.invBlock.items[k].amount) || a.invBlock.items[k].amount <= 0) {
+                delete a.invBlock.items[k];
               } else {
-                bagA.invBlock.items[k].amount = Math.floor(bagA.invBlock.items[k].amount);
+                a.invBlock.items[k].amount = Math.floor(a.invBlock.items[k].amount);
               }
             }
 
-            // Remove B from server state
-            const removed = chunk.objects.splice(j, 1)[0];
-
-            // Notify all clients: updated inventory for A
-            io.emit('UPDATE_INV', {
-              cx, cy,
-              objName: bagA.objName,
-              pos: { x: bagA.pos.x, y: bagA.pos.y },
-              z: bagA.z,
-              items: bagA.invBlock.items,
-            });
-
-            // And delete B
-            io.emit('DELETE_OBJ', {
-              cx, cy,
-              objName: removed?.objName || 'ItemBag',
-              pos: removed?.pos
-                ? { x: removed.pos.x, y: removed.pos.y }
-                : { x: bagB.pos.x, y: bagB.pos.y },
-              z: removed?.z ?? bagB.z ?? 0,
-            });
-
-            console.log(
-              `[mergeAllChunkBags] Merged (${bagB.pos.x},${bagB.pos.y}) -> (${bagA.pos.x},${bagA.pos.y}) in chunk ${key}`
-            );
-
-            mergedSomething = true;
-            break; // restart inner loop for fresh indices
+            toRemove.add(other.idx);
+            dirtyBags.add(entry.idx);
+            mergesLeft--;
+            if (mergesLeft <= 0) break;
           }
         }
-
-        if (mergedSomething) break; // restart outer loop
       }
+    }
+
+    if (toRemove.size) {
+      // Remove merged bags from chunk objects (highest index first)
+      const sorted = Array.from(toRemove).sort((a, b) => b - a);
+      for (const idx of sorted) {
+        const removed = chunk.objects.splice(idx, 1)[0];
+        io.to(room).emit('DELETE_OBJ', {
+          cx: roomCx,
+          cy: roomCy,
+          objName: removed?.objName || 'ItemBag',
+          pos: removed?.pos || { x: 0, y: 0 },
+          z: removed?.z ?? 0,
+        });
+      }
+    }
+
+    // Emit updates for bags that received merges
+    for (const idx of dirtyBags) {
+      const bag = chunk.objects[idx];
+      if (!bag) continue;
+      io.to(room).emit('UPDATE_INV', {
+        cx: roomCx,
+        cy: roomCy,
+        objName: bag.objName,
+        pos: { x: bag.pos.x, y: bag.pos.y },
+        z: bag.z,
+        items: bag.invBlock.items,
+      });
     }
   }
 }
+
+setInterval(() => {
+  mergeAllChunkBags(BAG_MERGE_BUDGET);
+}, BAG_MERGE_INTERVAL_MS);
 
