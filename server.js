@@ -336,8 +336,7 @@ const MAX_PLAYERS = parseInt(process.env.MAX, 10) || 10;
 const SAVE_INTERVAL_HOURS = parseFloat(process.env.SAVE_INTERVAL_HOURS || '3');
 const SUMMARY_INTERVAL_MS = parseInt(process.env.SUMMARY_INTERVAL_MS || '30000', 10);
 
-// ✅ Basic bad word filter (case-insensitive)
-const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag'];
+const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag', "kike"]
 const badWordRegex = new RegExp(badWords.join('|'), 'i');
 
 app.use(
