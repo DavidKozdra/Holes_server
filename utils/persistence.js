@@ -129,6 +129,7 @@ function serializePlayersSnapshot(players) {
           }
         : null,
       teamId: p.teamId || null,
+      passwordHash: p.passwordHash || null,
     };
   }
   return out;

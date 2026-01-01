@@ -106,9 +106,14 @@ exports.savePlayerData = (req, res) => {
       console.log(`[API] Player data saved for "${playerData.playerName}" via beforeunload`);
     }
 
-    // Save to snapshot cache for persistence
+    // Save to snapshot cache for persistence (preserve password hash if it exists)
     if (playerSnapshotCache) {
-      playerSnapshotCache[playerData.playerName] = playerData;
+      const existingSnapshot = playerSnapshotCache[playerData.playerName] || {};
+      const mergedSnapshot = { ...existingSnapshot, ...playerData };
+      if (existingSnapshot.passwordHash) {
+        mergedSnapshot.passwordHash = existingSnapshot.passwordHash;
+      }
+      playerSnapshotCache[playerData.playerName] = mergedSnapshot;
     }
     
     // Persist to disk

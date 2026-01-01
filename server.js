@@ -34,6 +34,7 @@ const { logger, DATA_DIR } = require('./utils/logger');
 const fs = require('fs');
 const { getGlobals } = require('./globals'); // Ensure correct import
 const { exec } = require('child_process');
+const bcrypt = require('bcryptjs');
 const globals = getGlobals(); // Shared state object
 let { players, serverMap, chatMessages, teams } = globals;
 var kills_deaths = {};
@@ -41,6 +42,29 @@ var kills_deaths = {};
 let savedPlayersByName = {};
 let summaryCache = globals.summaryCache;
 let playerSnapshotCache = globals.playerSnapshotCache;
+
+// Password hashing configuration
+const PASSWORD_SALT_ROUNDS = Math.min(14, Math.max(4, parseInt(process.env.PASSWORD_SALT_ROUNDS || '10', 10)));
+
+function hashPassword(plain = '') {
+  if (!plain || typeof plain !== 'string') return null;
+  try {
+    return bcrypt.hashSync(plain, PASSWORD_SALT_ROUNDS);
+  } catch (e) {
+    console.warn('[Auth] Failed to hash password', e);
+    return null;
+  }
+}
+
+function verifyPassword(plain = '', hashed = '') {
+  if (!plain || !hashed || typeof plain !== 'string' || typeof hashed !== 'string') return false;
+  try {
+    return bcrypt.compareSync(plain, hashed);
+  } catch (e) {
+    console.warn('[Auth] Failed to verify password', e);
+    return false;
+  }
+}
 
 // Async save tuning
 const PLAYER_SAVE_DEBOUNCE_MS = parseInt(process.env.PLAYER_SAVE_DEBOUNCE_MS || '400', 10);
@@ -73,6 +97,10 @@ function chunkCoordsFromPos(pos) {
   const cx = Math.floor(pos.x / (TILESIZE * CHUNKSIZE));
   const cy = Math.floor(pos.y / (TILESIZE * CHUNKSIZE));
   return { cx, cy };
+}
+
+function isValidPos(pos) {
+  return pos && Number.isFinite(pos.x) && Number.isFinite(pos.y);
 }
 
 function moveSocketToChunkRoom(socket, coords) {
@@ -123,6 +151,54 @@ function flushNodeBuffers() {
   };
   flush(chunkNodeBuffers, 'UPDATE_NODE');
   flush(chunkIronBuffers, 'UPDATE_IRON_NODE');
+}
+
+// Normalize position to plain {x, y} object
+function normalizePos(pos) {
+  if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return { x: 0, y: 0 };
+  return { x: pos.x, y: pos.y };
+}
+
+// Clone holding object to prevent circular references
+function cloneHolding(holding) {
+  if (!holding || typeof holding !== 'object') return holding;
+  try {
+    return JSON.parse(JSON.stringify(holding));
+  } catch (e) {
+    return null;
+  }
+}
+
+function sanitizePlayerForClient(player) {
+  if (!player) return player;
+  return {
+    id: player.id,
+    name: player.name,
+    pos: player.pos ? { x: player.pos.x, y: player.pos.y } : null,
+    race: player.race ?? null,
+    color: player.color ?? 0,
+    // Only share minimal combat info; omit inventory to avoid circular refs and reduce payload
+    statBlock: player.statBlock
+      ? {
+          level: player.statBlock.level,
+          xp: player.statBlock.xp,
+          xpNeeded: player.statBlock.xpNeeded,
+          stats: player.statBlock.stats
+            ? {
+                hp: player.statBlock.stats.hp,
+                mhp: player.statBlock.stats.mhp,
+                attack: player.statBlock.stats.attack,
+                magic: player.statBlock.stats.magic,
+                magicResistance: player.statBlock.stats.magicResistance,
+              }
+            : null,
+        }
+      : null,
+    invBlock: null,
+    teamId: player.teamId || null,
+    kills: player.kills || 0,
+    deaths: player.deaths || 0,
+  };
 }
 
 // Base stats for each race - must match client-side
@@ -188,10 +264,12 @@ function savePlayerSnapshot(player) {
     pos: player.pos || { x: 0, y: 0 },
     race: player.race || null,
     color: player.color ?? 0,
+    maxDirtInv: Number.isFinite(player.maxDirtInv) ? player.maxDirtInv : 600,
     // Deep copy statBlock to prevent reference issues
     statBlock: player.statBlock ? JSON.parse(JSON.stringify(player.statBlock)) : null,
     invBlock: cleanInv,
     teamId: player.teamId || null,
+    passwordHash: player.passwordHash || null,
   };
 
   schedulePlayerSnapshotPersist(player.name);
@@ -348,7 +426,6 @@ setInterval(() => {
 // Periodic summary snapshot cache for quick client consumption
 function snapshotServerSummary() {
   return {
-    players: snapshotPlayersForBroadcast(),
     teams,
     updatedAt: Date.now(),
   };
@@ -380,24 +457,13 @@ refreshSummaryCache();
 });
 
   function snapshotPlayersForBroadcast() {
-    const out = {};
-    for (const id of Object.keys(players)) {
-      const p = players[id];
-      if (!p) continue;
-      out[id] = {
-        id,
-        name: p.name,
-        pos: p.pos,
-        race: p.race,
-        color: p.color,
-        statBlock: p.statBlock,
-        invBlock: p.invBlock,
-        teamId: p.teamId,
-        kills: p.kills || 0,
-        deaths: p.deaths || 0,
-      };
-    }
-    return out;
+      const out = {};
+      for (const id of Object.keys(players)) {
+        const p = players[id];
+        if (!p) continue;
+        out[id] = sanitizePlayerForClient(p);
+      }
+      return out;
   }
 
   function newConnection(socket) {
@@ -419,13 +485,11 @@ refreshSummaryCache();
 
       console.log('New connection: ' + socket.id);
       try { logger.info('Client connected', { id: socket.id }); } catch {}
-      io.to(socket.id).emit('OLD_DATA', { players: players }); //maybe add old chat messages here?
+      // Send a minimal player list to avoid circular payloads
+      io.to(socket.id).emit('OLD_DATA', { players: {} });
       io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
-      // Send current summary snapshot if available
-      if (summaryCache) {
-        io.to(socket.id).emit('SERVER_SUMMARY', summaryCache);
-      }
+      // Skip sending SERVER_SUMMARY to avoid large/circular payloads for now
 
       if (TIMER_DISABLED) {
         io.to(socket.id).emit('sync_time', { disabled: true });
@@ -436,7 +500,11 @@ refreshSummaryCache();
       }
 
       socket.on('new_player', new_player);
-      function new_player(data) {
+      function new_player(data = {}, ack) {
+        const reply = (payload) => {
+          if (typeof ack === 'function') ack(payload);
+        };
+
         // Double-check capacity at the moment of joining
         const nowPlayers = Object.keys(players).length;
         if (nowPlayers >= MAX_PLAYERS) {
@@ -446,40 +514,56 @@ refreshSummaryCache();
             max: MAX_PLAYERS,
           });
           setTimeout(() => socket.disconnect(true), 100);
+          reply({ ok: false, code: 'FULL' });
           return;
         }
 
-        const originalName = data.name;
+        if (!data.name || typeof data.name !== 'string') {
+          reply({ ok: false, code: 'INVALID_NAME', message: 'Name is required.' });
+          return;
+        }
+
+        const originalName = data.name.trim();
         let name = originalName;
-        let suffix = 1;
 
         // Replace bad words with asterisks or generic fallback
         if (badWordRegex.test(name)) {
-          name = 'Player' + Math.random();
+          name = 'Player' + Math.random().toString(16).slice(2, 6);
         }
 
-        // ✅ Ensure uniqueness
-        const nameExists = (n) => {
-          return Object.values(players).some((player) => player && player.name === n);
-        };
-
-        while (nameExists(name)) {
-          name = `${originalName}_${suffix}`;
-          suffix++;
+        // Prevent duplicate live sessions on the same name
+        const liveConflict = Object.values(players).some((player) => player && player.name === name);
+        if (liveConflict) {
+          reply({ ok: false, code: 'NAME_IN_USE', message: 'That name is already in use.' });
+          return;
         }
 
-        // ✅ Only notify if the name was changed
-        if (name !== originalName) {
-          io.to(socket.id).emit('change_name', name);
-        }
+        const incomingPassword = typeof data.password === 'string' ? data.password : '';
+        delete data.password;
 
         data.name = name;
         data.kills = 0;
         data.deaths = 0;
-        
+
+        const snap = savedPlayersByName[name];
+        const snapHasPassword = !!snap?.passwordHash;
+        let passwordHashToPersist = snap?.passwordHash || null;
+
+        if (snapHasPassword) {
+          if (!incomingPassword) {
+            reply({ ok: false, code: 'PASSWORD_REQUIRED', message: 'Password required for this player.' });
+            return;
+          }
+          if (!verifyPassword(incomingPassword, snap.passwordHash)) {
+            reply({ ok: false, code: 'BAD_PASSWORD', message: 'Incorrect password.' });
+            return;
+          }
+        } else if (incomingPassword) {
+          passwordHashToPersist = hashPassword(incomingPassword);
+        }
+
         // IMPORTANT: Restore snapshot data BEFORE storing player
         // Otherwise disconnect will save empty inventory over old data!
-        const snap = savedPlayersByName[name];
         if (snap) {
           console.log(`[Spawn] Restoring saved data for "${name}" into server player object`);
           if (snap.invBlock) {
@@ -504,12 +588,18 @@ refreshSummaryCache();
           if (snap.teamId) {
             data.teamId = snap.teamId;
           }
+          if (Number.isFinite(snap.maxDirtInv)) {
+            data.maxDirtInv = snap.maxDirtInv;
+          }
         }
-        
+
+        data.passwordHash = passwordHashToPersist || null;
         // Store player with restored data
+        if (!Number.isFinite(data.maxDirtInv)) data.maxDirtInv = 600;
         players[data.id] = data;
 
-        socket.broadcast.emit('NEW_PLAYER', data);
+        const broadcastPlayer = sanitizePlayerForClient(data);
+        socket.broadcast.emit('NEW_PLAYER', broadcastPlayer);
         // Send team data to the joining player and all clients
         io.emit('TEAMS_UPDATE', { teams });
         
@@ -522,18 +612,21 @@ refreshSummaryCache();
           y: 0,
           user: 'SERVER',
         });
+
+        reply({ ok: true, isReturning, hasPassword: !!passwordHashToPersist });
       }
 
       // Handle explicit item request from client after spawn
       socket.on('request_my_items', (data) => {
         const playerName = data.name;
         const snap = savedPlayersByName[playerName];
+        const hasInventory = !!(snap && snap.invBlock);
         
         console.log(`[Items] Request from "${playerName}"`);
-        console.log(`[Items] Snapshot exists:`, !!snap);
+        console.log(`[Items] Snapshot exists:`, !!snap, 'inv?', hasInventory);
         
-        // If snapshot exists at all, they're a returning player
-        if (snap) {
+        // If snapshot exists with inventory, they're a returning player
+        if (snap && hasInventory) {
           console.log(`[Items] "${playerName}" is a RETURNING player - restoring old data`);
           console.log(`[Items] Position:`, snap.pos);
           console.log(`[Items] Level:`, snap.statBlock?.level);
@@ -564,6 +657,9 @@ refreshSummaryCache();
               if (snap.teamId) {
                 players[socket.id].teamId = snap.teamId;
               }
+              if (Number.isFinite(snap.maxDirtInv)) {
+                players[socket.id].maxDirtInv = snap.maxDirtInv;
+              }
             }
             
             // ✅ Send old data to client - they decide if items are empty
@@ -574,11 +670,12 @@ refreshSummaryCache();
             }
             console.log('[SERVER] Sending moves set to client:', Array.isArray(snap.movesSlots) ? snap.movesSlots : null);
             io.to(socket.id).emit('receive_my_items', {
-              hasOldItems: true, // Changed: always true if snapshot exists
+              hasOldItems: true, // only true when inventory exists
               invBlock: snap.invBlock ? JSON.parse(JSON.stringify(snap.invBlock)) : { items: {}, hotbar: ["","","","",""], selectedHotBar: 0, equiped: {}, movesSlots: [] },
               statBlock: statBlockToSend,
               pos: snap.pos ? { x: snap.pos.x, y: snap.pos.y } : null,
               teamId: snap.teamId || null,
+              maxDirtInv: Number.isFinite(snap.maxDirtInv) ? snap.maxDirtInv : 600,
               movesSlots: Array.isArray(snap.invBlock?.movesSlots) ? snap.invBlock.movesSlots : null,
             });
           } catch (e) {
@@ -591,6 +688,43 @@ refreshSummaryCache();
           // Tell client to give starter kit
           io.to(socket.id).emit('receive_my_items', { hasOldItems: false });
         }
+      });
+
+      socket.on('set_password', (data = {}, ack) => {
+        const reply = (payload) => {
+          if (typeof ack === 'function') ack(payload);
+        };
+
+        const p = players[socket.id];
+        if (!p || !p.name) {
+          reply({ ok: false, message: 'Player not logged in.' });
+          return;
+        }
+
+        const newPass = typeof data.password === 'string' ? data.password : '';
+        let hashed = null;
+        if (newPass) {
+          hashed = hashPassword(newPass);
+          if (!hashed) {
+            reply({ ok: false, message: 'Unable to set password.' });
+            return;
+          }
+        }
+
+        // Update in-memory player
+        p.passwordHash = hashed;
+
+        // Update snapshot without clobbering inventory if it's not yet present
+        const existingSnap = savedPlayersByName[p.name] || {};
+        savedPlayersByName[p.name] = {
+          ...existingSnap,
+          name: p.name,
+          passwordHash: hashed,
+          // keep existing snapshot fields if any; do not overwrite invBlock/statBlock when absent
+        };
+        schedulePlayerSnapshotPersist(p.name);
+
+        reply({ ok: true, hasPassword: !!hashed });
       });
 
       socket.on('sync_player_inventory', (data) => {
@@ -607,7 +741,7 @@ refreshSummaryCache();
         }
         
         // Also update position and stats if provided
-        if (data.pos) {
+        if (isValidPos(data.pos)) {
           players[socket.id].pos = data.pos;
         }
         if (data.statBlock) {
@@ -636,7 +770,7 @@ refreshSummaryCache();
           };
         }
         if (data.statBlock) p.statBlock = data.statBlock;
-        if (data.pos && data.pos.x != null && data.pos.y != null) p.pos = data.pos;
+        if (isValidPos(data.pos)) p.pos = data.pos;
         if (data.teamId !== undefined) p.teamId = data.teamId;
         if (data.race !== undefined) p.race = data.race;
         if (data.color !== undefined) p.color = data.color;
@@ -655,7 +789,13 @@ refreshSummaryCache();
 
       socket.on('player_reconnected', player_reconnected);
       function player_reconnected(data) {
-        players[data.player.id] = data.player;
+        if (!data || !data.player) return;
+        const incoming = data.player;
+        // Accept only sane positions
+        if (!isValidPos(incoming.pos)) {
+          incoming.pos = players[incoming.id]?.pos || { x: 0, y: 0 };
+        }
+        players[incoming.id] = incoming;
         if (kills_deaths[data.oldID] != undefined) {
           players[data.player.id].kills = kills_deaths[data.oldID].kills;
           players[data.player.id].deaths = kills_deaths[data.oldID].deaths;
@@ -665,10 +805,14 @@ refreshSummaryCache();
           players[data.player.id].deaths = 0;
         }
 
+        // Join proper chunk room if we have coords
+        const coords = chunkCoordsFromPos(players[data.player.id].pos);
+        moveSocketToChunkRoom(socket, coords);
+
         // Note: Team membership is now based on username, not socket ID
         // No ID fixing needed on reconnect
 
-        socket.broadcast.emit('NEW_PLAYER', data.player);
+        socket.broadcast.emit('NEW_PLAYER', sanitizePlayerForClient(data.player));
         socket.broadcast.emit('PLAYERS_CHECK', {
           ids: Object.keys(players),
         });
@@ -755,17 +899,25 @@ refreshSummaryCache();
           return;
         }
 
-        players[data.id].pos = data.pos;
-        players[data.id].holding = data.holding;
-
-        const coords = chunkCoordsFromPos(data.pos);
-        moveSocketToChunkRoom(socket, coords);
-
-        // Broadcast the updated position to other clients
-        if (coords) {
-          socket.to(chunkRoom(coords.cx, coords.cy)).emit('UPDATE_POS', data);
-        } else {
-          socket.broadcast.emit('UPDATE_POS', data);
+        if (isValidPos(data.pos)) {
+          players[data.id].pos = data.pos;
+          const coords = chunkCoordsFromPos(data.pos);
+          moveSocketToChunkRoom(socket, coords);
+          // Broadcast the updated position to other clients with normalized payload
+          const normalizedData = {
+            id: data.id,
+            pos: normalizePos(data.pos),
+            holding: cloneHolding(data.holding)
+          };
+          if (coords) {
+            socket.to(chunkRoom(coords.cx, coords.cy)).emit('UPDATE_POS', normalizedData);
+          } else {
+            socket.broadcast.emit('UPDATE_POS', normalizedData);
+          }
+        }
+        // Always update holding if present
+        if (data.holding !== undefined) {
+          players[data.id].holding = data.holding;
         }
       }
 
@@ -811,15 +963,24 @@ refreshSummaryCache();
         players[data.id].pos = data.pos;
         players[data.id].holding = data.holding;
 
+        // Normalize the broadcast payload to avoid circular references
+        const normalizedData = {
+          id: data.id,
+          pos: normalizePos(data.pos),
+          holding: cloneHolding(data.holding),
+          update_names: data.update_names,
+          update_values: data.update_values
+        };
+
         // Broadcast visual effect changes to all clients, stat changes only to the player
         if (hasVisual) {
-          io.emit('UPDATE_PLAYER', data);
+          io.emit('UPDATE_PLAYER', normalizedData);
           // Also emit explicit visual event for all clients
           for (const evt of visualEvents) {
             io.emit('ABILITY_VISUAL', evt);
           }
         } else {
-          io.to(data.id).emit('UPDATE_PLAYER', data);
+          io.to(data.id).emit('UPDATE_PLAYER', normalizedData);
         }
       }
 
@@ -1233,7 +1394,7 @@ refreshSummaryCache();
         for (let x = posX - data.radius; x <= posX + data.radius; x++) {
           for (let y = posY - data.radius; y <= posY + data.radius; y++) {
             if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-              let index = x + y / CHUNKSIZE;
+              let index = x + y * CHUNKSIZE;
               if (data.amt > 0) {
                 if (chunk.data[index] > 0) chunk.data[index] -= data.amt;
                 if (chunk.data[index] < 0.3 && chunk.data[index] !== -1) {
@@ -1254,35 +1415,35 @@ refreshSummaryCache();
               if (y < 0 && x >= 0 && x < CHUNKSIZE) {
                 // top edge
                 tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
-                index = x + 1 + y / CHUNKSIZE;
+                index = x + 1 + y * CHUNKSIZE;
               } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
                 // bottom edge
                 tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
-                index = x + -1 + y / CHUNKSIZE;
+                index = x - 1 + (y - CHUNKSIZE) * CHUNKSIZE;
               } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
                 // left edge
                 tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
-                index = x + CHUNKSIZE + y / CHUNKSIZE;
+                index = (CHUNKSIZE + x) + y * CHUNKSIZE;
               } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
                 // right edge
                 tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
-                index = x - CHUNKSIZE + y / CHUNKSIZE;
+                index = (x - CHUNKSIZE) + y * CHUNKSIZE;
               } else if (x < 0 && y < 0) {
                 // top left corner
                 tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
-                index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
+                index = (CHUNKSIZE + x + 1) + (CHUNKSIZE + y) * CHUNKSIZE;
               } else if (x >= CHUNKSIZE && y < 0) {
                 // top right corner
                 tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
-                index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
+                index = (x - CHUNKSIZE + 1) + (CHUNKSIZE + y) * CHUNKSIZE;
               } else if (x < 0 && y >= CHUNKSIZE) {
                 // bottom left corner
                 tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
-                index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
+                index = (CHUNKSIZE + x - 1) + (y - CHUNKSIZE) * CHUNKSIZE;
               } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
                 // bottom right corner
                 tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
-                index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
+                index = (x - CHUNKSIZE - 1) + (y - CHUNKSIZE) * CHUNKSIZE;
               }
               if (tempChunk != undefined) {
                 if (index != undefined) {
@@ -1322,7 +1483,7 @@ refreshSummaryCache();
         for (let x = posX - data.radius; x <= posX + data.radius; x++) {
           for (let y = posY - data.radius; y <= posY + data.radius; y++) {
             if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-              let index = x + y / CHUNKSIZE;
+              let index = x + y * CHUNKSIZE;
               if (data.amt > 0) {
                 if (chunk.iron_data[index] > 0) {
                   reward += chunk.iron_data[index];
@@ -1346,35 +1507,35 @@ refreshSummaryCache();
               if (y < 0 && x >= 0 && x < CHUNKSIZE) {
                 // top edge
                 tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
-                index = x + 1 + y / CHUNKSIZE;
+                index = x + 1 + y * CHUNKSIZE;
               } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
                 // bottom edge
                 tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
-                index = x + -1 + y / CHUNKSIZE;
+                index = x - 1 + (y - CHUNKSIZE) * CHUNKSIZE;
               } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
                 // left edge
                 tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
-                index = x + CHUNKSIZE + y / CHUNKSIZE;
+                index = (CHUNKSIZE + x) + y * CHUNKSIZE;
               } else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
                 // right edge
                 tempChunk = serverMap.getChunk(data.cx + 1, data.cy);
-                index = x - CHUNKSIZE + y / CHUNKSIZE;
+                index = (x - CHUNKSIZE) + y * CHUNKSIZE;
               } else if (x < 0 && y < 0) {
                 // top left corner
                 tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
-                index = x + CHUNKSIZE + 1 + y / CHUNKSIZE;
+                index = (CHUNKSIZE + x + 1) + (CHUNKSIZE + y) * CHUNKSIZE;
               } else if (x >= CHUNKSIZE && y < 0) {
                 // top right corner
                 tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
-                index = x - CHUNKSIZE + 1 + y / CHUNKSIZE;
+                index = (x - CHUNKSIZE + 1) + (CHUNKSIZE + y) * CHUNKSIZE;
               } else if (x < 0 && y >= CHUNKSIZE) {
                 // bottom left corner
                 tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
-                index = x + CHUNKSIZE + -1 + y / CHUNKSIZE;
+                index = (CHUNKSIZE + x - 1) + (y - CHUNKSIZE) * CHUNKSIZE;
               } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
                 // bottom right corner
                 tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
-                index = x - CHUNKSIZE + -1 + y / CHUNKSIZE;
+                index = (x - CHUNKSIZE - 1) + (y - CHUNKSIZE) * CHUNKSIZE;
               }
               if (tempChunk != undefined) {
                 if (index != undefined) {
@@ -1913,8 +2074,8 @@ setInterval(() => {
         const target = coords ? io.to(chunkRoom(coords.cx, coords.cy)) : io;
         target.emit('UPDATE_PLAYER', {
           id: id,
-          pos: p.pos,
-          holding: p.holding,
+          pos: normalizePos(p.pos),
+          holding: cloneHolding(p.holding),
           update_names: updateNames,
           update_values: updateValues
         });
