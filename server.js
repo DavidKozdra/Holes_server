@@ -118,8 +118,22 @@ function savePlayerSnapshot(player) {
   return true;
 }
 
+// Delete a player's snapshot from persistent storage (used for permadeath)
+function deletePlayerSnapshotByName(playerName) {
+  if (!playerName) return false;
+  if (!savedPlayersByName[playerName]) return false;
+  delete savedPlayersByName[playerName];
+  try {
+    saveState({ players, serverMap, chatMessages, teams, playersSnapshot: savedPlayersByName });
+  } catch {}
+  return true;
+}
+
 const dotenv = require('dotenv');
 dotenv.config();
+
+// Permadeath toggle (set PERMA_DEATH=true in environment to enable)
+const PERMA_DEATH_ENABLED = (process.env.PERMA_DEATH || 'false').toLowerCase() === 'true';
 
 // CLI utilities: allow clearing data via --delete
 (function cliUtils(){
@@ -1714,6 +1728,16 @@ refreshSummaryCache();
         if (players[id]) {
           players[id].isDead = true; // or players[id].status = "dead", etc.
           players[id].deaths += 1;
+
+          // Permadeath: remove player from persistent world data if enabled
+          if (PERMA_DEATH_ENABLED) {
+            const removed = deletePlayerSnapshotByName(players[id].name);
+            if (removed) {
+              try { logger.info('Permadeath: player removed from persistence', { name: players[id].name }); } catch {}
+            }
+            // Notify the victim client that this is a permadeath
+            socket.emit('PERMA_DEATH', { hardcore: true });
+          }
         }
         // Notify all players within range of the death
         for (let pid in players) {

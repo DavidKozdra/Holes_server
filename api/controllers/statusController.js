@@ -12,6 +12,7 @@ const ServerLogo = (process.env.SERVER_LOGO===""|| process.env.SERVER_LOGO === n
 const ServerName = process.env.SERVER_NAME || "TEST";
 const RULES = process.env.RULES;
 const get_max = parseFloat(process.env.MAX) || 10;
+const PERMA_DEATH = (process.env.PERMA_DEATH || 'false').toLowerCase() === 'true';
 
 exports.getStatus = (req, res) => {
   console.log('Status requested');
@@ -28,6 +29,7 @@ exports.getStatus = (req, res) => {
     image: `data:image/png;base64,${base64Image}`,  
     name: ServerName,
     max: get_max,
+    hardcore: PERMA_DEATH,
     serverStartTime: serverStartTime,
   });
 };
