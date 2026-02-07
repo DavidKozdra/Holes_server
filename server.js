@@ -490,6 +490,15 @@ refreshSummaryCache();
       return out;
   }
 
+  // ── Periodic PLAYERS_SYNC: self-healing reconciliation ──
+  // Every 5 seconds, broadcast the full player list so clients can
+  // recover from any dropped NEW_PLAYER / REMOVE_PLAYER events.
+  setInterval(() => {
+    const ids = Object.keys(players);
+    if (ids.length === 0) return; // nothing to sync
+    io.emit('PLAYERS_SYNC', { players: snapshotPlayersForBroadcast() });
+  }, 5000);
+
   function newConnection(socket) {
     try {
       //all caps means it came from the server
@@ -625,6 +634,10 @@ refreshSummaryCache();
         // Store player with restored data
         if (!Number.isFinite(data.maxDirtInv)) data.maxDirtInv = 600;
         players[data.id] = data;
+
+        // Immediately assign chunk room so this player receives chunk-scoped broadcasts
+        const spawnCoords = chunkCoordsFromPos(data.pos);
+        if (spawnCoords) moveSocketToChunkRoom(socket, spawnCoords);
 
         const broadcastPlayer = sanitizePlayerForClient(data);
         socket.broadcast.emit('NEW_PLAYER', broadcastPlayer);
