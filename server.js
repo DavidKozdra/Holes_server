@@ -509,8 +509,8 @@ refreshSummaryCache();
 
       console.log('New connection: ' + socket.id);
       try { logger.info('Client connected', { id: socket.id }); } catch {}
-      // Send a minimal player list to avoid circular payloads
-      io.to(socket.id).emit('OLD_DATA', { players: {} });
+      // Send all existing players so the new client can see everyone
+      io.to(socket.id).emit('OLD_DATA', { players: snapshotPlayersForBroadcast() });
       io.to(socket.id).emit('YOUR_ID', { id: socket.id });
 
       // Skip sending SERVER_SUMMARY to avoid large/circular payloads for now
