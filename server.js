@@ -611,6 +611,10 @@ refreshSummaryCache();
           }
           if (snap.teamId) {
             data.teamId = snap.teamId;
+            // Apply team color so other clients see it immediately
+            if (teams[snap.teamId] && teams[snap.teamId].color) {
+              data.color = teams[snap.teamId].color;
+            }
           }
           if (Number.isFinite(snap.maxDirtInv)) {
             data.maxDirtInv = snap.maxDirtInv;
@@ -680,6 +684,10 @@ refreshSummaryCache();
               }
               if (snap.teamId) {
                 players[socket.id].teamId = snap.teamId;
+                // Apply team color so other clients see it immediately
+                if (teams[snap.teamId] && teams[snap.teamId].color) {
+                  players[socket.id].color = teams[snap.teamId].color;
+                }
               }
               if (Number.isFinite(snap.maxDirtInv)) {
                 players[socket.id].maxDirtInv = snap.maxDirtInv;
