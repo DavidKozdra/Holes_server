@@ -103,14 +103,38 @@ function isValidPos(pos) {
   return pos && Number.isFinite(pos.x) && Number.isFinite(pos.y);
 }
 
+// Returns all room names in the 3x3 grid around a chunk coord
+function getNeighborRooms(cx, cy) {
+  const rooms = [];
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      rooms.push(chunkRoom(cx + dx, cy + dy));
+    }
+  }
+  return rooms;
+}
+
 function moveSocketToChunkRoom(socket, coords) {
   if (!socket || !coords) return;
-  const room = chunkRoom(coords.cx, coords.cy);
+  const centerRoom = chunkRoom(coords.cx, coords.cy);
   const current = socketChunkRooms.get(socket.id);
-  if (current === room) return;
-  if (current) socket.leave(current);
-  socket.join(room);
-  socketChunkRooms.set(socket.id, room);
+  if (current && current.center === centerRoom) return; // no change
+
+  const newRooms = getNeighborRooms(coords.cx, coords.cy);
+
+  // Leave old rooms that aren't in the new set
+  if (current && current.rooms) {
+    for (const oldRoom of current.rooms) {
+      if (!newRooms.includes(oldRoom)) socket.leave(oldRoom);
+    }
+  }
+  // Join new rooms that weren't in the old set
+  const oldRooms = (current && current.rooms) || [];
+  for (const newRoom of newRooms) {
+    if (!oldRooms.includes(newRoom)) socket.join(newRoom);
+  }
+
+  socketChunkRooms.set(socket.id, { center: centerRoom, rooms: newRooms, cx: coords.cx, cy: coords.cy });
 }
 
 const NODE_FLUSH_INTERVAL_MS = 75;
@@ -339,6 +363,7 @@ const SUMMARY_INTERVAL_MS = parseInt(process.env.SUMMARY_INTERVAL_MS || '30000',
 const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag', "kike"]
 const badWordRegex = new RegExp(badWords.join('|'), 'i');
 
+app.use(express.json());           // parse JSON bodies (needed by /api/save-player-data)
 app.use(
   cors({
     origin: true, // This automatically reflects the request's origin
@@ -909,7 +934,10 @@ refreshSummaryCache();
             holding: cloneHolding(data.holding)
           };
           if (coords) {
-            socket.to(chunkRoom(coords.cx, coords.cy)).emit('UPDATE_POS', normalizedData);
+            const rooms = getNeighborRooms(coords.cx, coords.cy);
+            for (const room of rooms) {
+              socket.to(room).emit('UPDATE_POS', normalizedData);
+            }
           } else {
             socket.broadcast.emit('UPDATE_POS', normalizedData);
           }
@@ -971,18 +999,33 @@ refreshSummaryCache();
           update_values: data.update_values
         };
 
-        // Always broadcast position/holding to all clients for smooth movement
-        // Broadcast visual effects and position to everyone
+        // Broadcast through chunk rooms (3x3 grid) instead of globally
+        const playerCoords = chunkCoordsFromPos(data.pos);
+        if (playerCoords) {
+          moveSocketToChunkRoom(socket, playerCoords);
+        }
+
+        const emitToNearby = (event, payload) => {
+          if (playerCoords) {
+            // Emit to the player's 3x3 chunk room grid
+            const rooms = getNeighborRooms(playerCoords.cx, playerCoords.cy);
+            for (const room of rooms) {
+              socket.to(room).emit(event, payload);
+            }
+          } else {
+            socket.broadcast.emit(event, payload);
+          }
+        };
+
         if (hasVisual) {
-          io.emit('UPDATE_PLAYER', normalizedData);
-          // Also emit explicit visual event for all clients
+          emitToNearby('UPDATE_PLAYER', normalizedData);
+          // Also emit explicit visual event to nearby clients
           for (const evt of visualEvents) {
-            io.emit('ABILITY_VISUAL', evt);
+            emitToNearby('ABILITY_VISUAL', evt);
           }
         } else {
-          // Broadcast position to all clients, stats only to the player
           if (data.pos || data.holding) {
-            io.emit('UPDATE_PLAYER', normalizedData);
+            emitToNearby('UPDATE_PLAYER', normalizedData);
           } else {
             // Only stat updates, send just to the player
             io.to(data.id).emit('UPDATE_PLAYER', normalizedData);
