@@ -1,29 +1,3 @@
-
-function newConnection(socket) {
-    // Listen for explosion events and broadcast to all clients
-    socket.on('EXPLOSION', (data) => {
-      // { x, y, w, h }
-      socket.broadcast.emit('EXPLOSION', data);
-    });
-  // ...existing code...
-
-  // Sync movesSlots from client
-  socket.on('update_moves', (data = {}) => {
-    console.log('[SERVER] update_moves received:', data);
-    const p = players[socket.id] || {};
-    if (Array.isArray(data.movesSlots)) {
-      p.movesSlots = data.movesSlots;
-      console.log('[SERVER] Moves set saved for player:', p.name, p.movesSlots);
-    }
-    // Persist to snapshot
-    if (p.name) {
-      savePlayerSnapshot(p);
-    }
-    io.to(socket.id).emit('PLAYER_MOVES_SAVED', { ok: true });
-  });
-
-  // ...existing code...
-}
 const express = require('express');
 const socket = require('socket.io');
 const cors = require('cors');
@@ -201,7 +175,7 @@ function sanitizePlayerForClient(player) {
     pos: player.pos ? { x: player.pos.x, y: player.pos.y } : null,
     race: player.race ?? null,
     color: player.color ?? 0,
-    // Only share minimal combat info; omit inventory to avoid circular refs and reduce payload
+    holding: player.holding || { w: false, a: false, s: false, d: false },
     statBlock: player.statBlock
       ? {
           level: player.statBlock.level,
@@ -390,6 +364,8 @@ const io = socket(server, {
     methods: ['GET', 'POST'],
     credentials: true,
   },
+  pingTimeout: 30000,
+  pingInterval: 10000,
 });
 
 io.sockets.on('connection', newConnection);
@@ -577,6 +553,7 @@ refreshSummaryCache();
         data.name = name;
         data.kills = 0;
         data.deaths = 0;
+        data.holding = data.holding || { w: false, a: false, s: false, d: false };
 
         const snap = savedPlayersByName[name];
         const snapHasPassword = !!snap?.passwordHash;
@@ -840,6 +817,11 @@ refreshSummaryCache();
         if (!isValidPos(incoming.pos)) {
           incoming.pos = players[incoming.id]?.pos || { x: 0, y: 0 };
         }
+        // Clean up old player entry to prevent ghost duplicates
+        if (data.oldID && data.oldID !== incoming.id) {
+          delete players[data.oldID];
+          socketChunkRooms.delete(data.oldID);
+        }
         players[incoming.id] = incoming;
         if (kills_deaths[data.oldID] != undefined) {
           players[data.player.id].kills = kills_deaths[data.oldID].kills;
@@ -1053,6 +1035,24 @@ refreshSummaryCache();
           }
         }
       }
+
+      // Broadcast explosion events to nearby clients
+      socket.on('EXPLOSION', (data) => {
+        socket.broadcast.emit('EXPLOSION', data);
+      });
+
+      // Sync movesSlots from client
+      socket.on('update_moves', (data = {}) => {
+        const p = players[socket.id];
+        if (!p) return;
+        if (Array.isArray(data.movesSlots)) {
+          p.movesSlots = data.movesSlots;
+        }
+        if (p.name) {
+          savePlayerSnapshot(p);
+        }
+        io.to(socket.id).emit('PLAYER_MOVES_SAVED', { ok: true });
+      });
 
       // Spawn entity handler (e.g., for Queen's Kiss ability)
       socket.on('spawn_entity', (data) => {
