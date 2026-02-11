@@ -1015,10 +1015,23 @@ let isShuttingDown = false;
       //all lower means it came from the client
 
       // ── Socket-level rate limiting ──
-      // Uses socket.use() middleware so excess events are actually blocked
-      // (onAny is passive and cannot prevent event handlers from running)
-      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 500, warned: false };
+      // Uses socket.use() middleware so excess events are actually blocked.
+      // Critical protocol events (heartbeats, auth) are always allowed through
+      // so that rate-limiting never kills the connection itself.
+      const RATE_LIMIT_EXEMPT = new Set([
+        'app_ping',           // App-level heartbeat — must always respond
+        'new_player',         // Login — one-shot
+        'player_reconnected', // Reconnect — one-shot
+        'player_leave',       // Logout — one-shot
+        'disconnect',         // Socket.IO internal
+        'set_password',       // Auth — rare
+      ]);
+      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 200, warned: false };
       socket.use((packet, next) => {
+        const eventName = packet[0];
+        // Always allow critical protocol events through
+        if (RATE_LIMIT_EXEMPT.has(eventName)) return next();
+
         const now = Date.now();
         if (now - socketRateLimit.lastReset > 1000) {
           socketRateLimit.count = 0;
