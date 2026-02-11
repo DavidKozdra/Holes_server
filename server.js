@@ -1017,7 +1017,7 @@ let isShuttingDown = false;
       // ── Socket-level rate limiting ──
       // Uses socket.use() middleware so excess events are actually blocked
       // (onAny is passive and cannot prevent event handlers from running)
-      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 240, warned: false };
+      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 500, warned: false };
       socket.use((packet, next) => {
         const now = Date.now();
         if (now - socketRateLimit.lastReset > 1000) {
