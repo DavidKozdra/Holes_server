@@ -28,6 +28,8 @@
   },
   "homepage": "https://github.com/PolyPixels/Holes_server#readme",
   "dependencies": {
+    "@geckos.io/client": "^3.0.2",
+    "@geckos.io/server": "^3.0.2",
     "alea": "^1.0.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

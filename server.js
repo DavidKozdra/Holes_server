@@ -9,6 +9,7 @@ const fs = require('fs');
 const { getGlobals } = require('./globals'); // Ensure correct import
 const { exec } = require('child_process');
 const bcrypt = require('bcryptjs');
+const udp = require('./utils/udpTransport');
 const globals = getGlobals(); // Shared state object
 let { players, serverMap, chatMessages, teams } = globals;
 var kills_deaths = {};
@@ -99,13 +100,19 @@ function moveSocketToChunkRoom(socket, coords) {
   // Leave old rooms that aren't in the new set
   if (current && current.rooms) {
     for (const oldRoom of current.rooms) {
-      if (!newRooms.includes(oldRoom)) socket.leave(oldRoom);
+      if (!newRooms.includes(oldRoom)) {
+        socket.leave(oldRoom);
+        udp.leaveRoom(socket.id, oldRoom); // Mirror to UDP
+      }
     }
   }
   // Join new rooms that weren't in the old set
   const oldRooms = (current && current.rooms) || [];
   for (const newRoom of newRooms) {
-    if (!oldRooms.includes(newRoom)) socket.join(newRoom);
+    if (!oldRooms.includes(newRoom)) {
+      socket.join(newRoom);
+      udp.joinRoom(socket.id, newRoom); // Mirror to UDP
+    }
   }
 
   socketChunkRooms.set(socket.id, { center: centerRoom, rooms: newRooms, cx: coords.cx, cy: coords.cy });
@@ -143,7 +150,12 @@ function flushNodeBuffers() {
       const [cx, cy] = key.split(',').map((n) => parseInt(n, 10));
       const room = chunkRoom(cx, cy);
       for (const payload of updates) {
-        io.to(room).emit(eventName, payload);
+        // Use UDP for high-freq node updates when available
+        if (udpReady) {
+          udp.broadcastToRoom(room, eventName, payload);
+        } else {
+          io.to(room).emit(eventName, payload);
+        }
       }
     }
   };
@@ -370,6 +382,242 @@ const io = socket(server, {
 
 io.sockets.on('connection', newConnection);
 
+// ── UDP Transport Initialization ──
+// High-frequency events will be sent over WebRTC DataChannels (UDP) when available,
+// with automatic fallback to Socket.IO (TCP) if the UDP channel isn't connected.
+let udpReady = false;
+
+// Helper: emit to a specific player via UDP if available, else Socket.IO
+function emitToPlayer(socketId, event, data) {
+  if (udpReady && udp.hasChannel(socketId)) {
+    udp.sendToPlayer(socketId, event, data);
+  } else {
+    io.to(socketId).emit(event, data);
+  }
+}
+
+// Helper: emit to a room via UDP if available, else Socket.IO
+function emitToRoom(roomName, event, data) {
+  if (udpReady) {
+    udp.broadcastToRoom(roomName, event, data);
+  }
+  // Always also emit via Socket.IO for clients without UDP
+  io.to(roomName).emit(event, data);
+}
+
+// Helper: emit to a room excluding a sender via UDP + Socket.IO fallback
+function broadcastToRoomFrom(senderSocket, roomName, event, data) {
+  if (udpReady) {
+    udp.broadcastToRoom(roomName, event, data);
+  }
+  // Socket.IO broadcast to room excluding sender (for clients without UDP)
+  senderSocket.to(roomName).emit(event, data);
+}
+
+// Helper: emit to all via UDP if available, else Socket.IO
+function emitToAll(event, data) {
+  if (udpReady) {
+    udp.emitAll(event, data);
+  }
+  // Also via Socket.IO for non-UDP clients
+  io.emit(event, data);
+}
+
+// UDP client→server message handlers — these mirror the Socket.IO handlers
+// and are registered once during init. Each handler receives (data, socketId).
+// They delegate to the same game logic as Socket.IO handlers.
+const udpClientHandlers = {};
+
+// update_player: The most frequent event — position + state updates
+udpClientHandlers['update_player'] = (data, socketId) => {
+  if (!data || !data.id) return;
+  // Only allow the player to update their own data
+  if (data.id !== socketId) return;
+  if (!players[data.id]) return;
+
+  // Replicate the update_player logic
+  let hasVisual = false;
+  let visualEvents = [];
+  for (let i = 0; i < (data.update_names || []).length; i++) {
+    const name = data.update_names[i];
+    const value = data.update_values[i];
+    if (name.includes('stats')) {
+      if (players[data.id].statBlock) players[data.id].statBlock.stats[name.split('stats.')[1]] = value;
+    } else if (name.includes('statBlock')) {
+      if (players[data.id].statBlock) players[data.id].statBlock[name.split('statBlock.')[1]] = value;
+    } else {
+      players[data.id][name] = value;
+      if (name === 'forcefieldActive' || name === 'isDashing' || name === 'flashTimer' ||
+          name === 'particles' || name === 'meditateActive' || name === 'auraTimer' ||
+          name === 'dashTimer' || name === 'combustionActive') {
+        hasVisual = true;
+        visualEvents.push({ playerId: data.id, ability: name, value: value });
+      }
+    }
+  }
+  if (isValidPos(data.pos)) {
+    players[data.id].pos = data.pos;
+    // Find the socket object to update rooms
+    const sio = io.sockets.sockets.get(socketId);
+    if (sio) {
+      const coords = chunkCoordsFromPos(data.pos);
+      if (coords) moveSocketToChunkRoom(sio, coords);
+    }
+  }
+  if (data.holding !== undefined) players[data.id].holding = data.holding;
+
+  const normalizedData = {
+    id: data.id,
+    pos: normalizePos(data.pos),
+    holding: cloneHolding(data.holding),
+    update_names: data.update_names || [],
+    update_values: data.update_values || []
+  };
+
+  const playerCoords = chunkCoordsFromPos(data.pos);
+  const broadcastUdp = (event, payload) => {
+    if (playerCoords) {
+      const rooms = getNeighborRooms(playerCoords.cx, playerCoords.cy);
+      for (const room of rooms) {
+        udp.broadcastToRoom(room, event, payload);
+      }
+    } else {
+      udp.emitAll(event, payload);
+    }
+  };
+
+  if (hasVisual) {
+    broadcastUdp('UPDATE_PLAYER', normalizedData);
+    for (const evt of visualEvents) broadcastUdp('ABILITY_VISUAL', evt);
+  } else if (data.pos || data.holding) {
+    broadcastUdp('UPDATE_PLAYER', normalizedData);
+  }
+};
+
+// update_node: Terrain digging (dirt)
+udpClientHandlers['update_node'] = (data, socketId) => {
+  if (!data || !data.chunkPos) return;
+  let chunkPos = data.chunkPos.split(',');
+  chunkPos[0] = parseInt(chunkPos[0]);
+  chunkPos[1] = parseInt(chunkPos[1]);
+  let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
+  if (data.amt > 0) {
+    if (chunk.data[data.index] > 0) chunk.data[data.index] -= data.amt;
+    if (chunk.data[data.index] < 0.3 && chunk.data[data.index] !== -1) chunk.data[data.index] = 0;
+  } else {
+    if (chunk.data[data.index] < 1.3 && chunk.data[data.index] !== -1) chunk.data[data.index] -= data.amt;
+    if (chunk.data[data.index] > 1.3) chunk.data[data.index] = 1.3;
+  }
+  bufferNodeUpdate(chunkPos[0], chunkPos[1], data, false);
+};
+
+// update_iron_node: Terrain mining (iron)
+udpClientHandlers['update_iron_node'] = (data, socketId) => {
+  if (!data || !data.chunkPos) return;
+  let chunkPos = data.chunkPos.split(',');
+  chunkPos[0] = parseInt(chunkPos[0]);
+  chunkPos[1] = parseInt(chunkPos[1]);
+  let chunk = serverMap.getChunk(chunkPos[0], chunkPos[1]);
+  if (data.amt > 0) {
+    if (chunk.iron_data[data.index] > 0) chunk.iron_data[data.index] -= data.amt;
+    if (chunk.iron_data[data.index] < 0.3 && chunk.iron_data[data.index] !== -1) chunk.iron_data[data.index] = 0;
+  } else {
+    if (chunk.iron_data[data.index] < 1.3 && chunk.iron_data[data.index] !== -1) chunk.iron_data[data.index] -= data.amt;
+    if (chunk.iron_data[data.index] > 1.3) chunk.iron_data[data.index] = 1.3;
+  }
+  bufferNodeUpdate(chunkPos[0], chunkPos[1], data, true);
+};
+
+// EXPLOSION: Visual effect broadcast
+udpClientHandlers['EXPLOSION'] = (data, socketId) => {
+  if (!data) return;
+  udp.emitAll('EXPLOSION', data);
+};
+
+// new_proj: Projectile spawned
+udpClientHandlers['new_proj'] = (data, socketId) => {
+  if (!data) return;
+  if (!data.cPos && data.pos) {
+    const cx = Math.floor(data.pos.x / (TILESIZE * CHUNKSIZE));
+    const cy = Math.floor(data.pos.y / (TILESIZE * CHUNKSIZE));
+    data.cPos = { x: cx, y: cy };
+  }
+  if (data.cPos) {
+    let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+    if (chunk) chunk.projectiles.push(data);
+  }
+  udp.emitAll('NEW_PROJECTILE', data);
+};
+
+// delete_proj: Projectile removed
+udpClientHandlers['delete_proj'] = (data, socketId) => {
+  if (!data) return;
+  if (!data.cPos && data.pos) {
+    const cx = Math.floor(data.pos.x / (TILESIZE * CHUNKSIZE));
+    const cy = Math.floor(data.pos.y / (TILESIZE * CHUNKSIZE));
+    data.cPos = { x: cx, y: cy };
+  }
+  if (!data.cPos) return;
+  let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+  if (!chunk) return;
+  for (let i = chunk.projectiles.length - 1; i >= 0; i--) {
+    if (data.id == chunk.projectiles[i].id) {
+      chunk.projectiles.splice(i, 1);
+      udp.emitAll('DELETE_PROJ', data);
+      break;
+    }
+  }
+};
+
+// new_sound: Spatial sound spawned
+udpClientHandlers['new_sound'] = (data, socketId) => {
+  if (!data || !data.cPos) return;
+  let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+  if (chunk) chunk.soundObjs.push(data);
+  udp.emitAll('NEW_SOUND', data);
+};
+
+// delete_sound: Spatial sound removed
+udpClientHandlers['delete_sound'] = (data, socketId) => {
+  if (!data || !data.cPos) return;
+  let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
+  if (!chunk) return;
+  for (let i = chunk.soundObjs.length - 1; i >= 0; i--) {
+    if (data.id == chunk.soundObjs[i].id && data.lifeSpan == chunk.soundObjs[i].lifeSpan &&
+        data.pos.x == chunk.soundObjs[i].pos.x && data.pos.y == chunk.soundObjs[i].pos.y) {
+      chunk.soundObjs.splice(i, 1);
+    }
+  }
+};
+
+// wander_request: Entity AI wander
+udpClientHandlers['wander_request'] = (data, socketId) => {
+  if (!data || !data.id) return;
+  for (let i = 0; i < serverMap.brains.length; i++) {
+    if (data.id == serverMap.brains[i].id) {
+      let angle = Math.random() * 2 * Math.PI;
+      let target = { x: data.pos.x + Math.cos(angle) * 100, y: data.pos.y + Math.sin(angle) * 100 };
+      udp.emitAll('WANDER_TARGET', { id: data.id, target: target });
+      serverMap.brains[i].target = target;
+      break;
+    }
+  }
+};
+
+(async function startUdp() {
+  const ok = await udp.initUdpTransport(server, (socketId, channel) => {
+    // Channel ready callback — notify the client that UDP is active
+    io.to(socketId).emit('UDP_CONNECTED', { ok: true });
+    console.log(`[UDP] Channel ready for ${socketId}`);
+  }, udpClientHandlers);
+  if (ok) {
+    udpReady = true;
+    console.log('[Server] UDP transport ready — high-frequency events will use WebRTC DataChannels');
+  } else {
+    console.warn('[Server] UDP transport failed to init — all traffic will use Socket.IO (TCP)');
+  }
+})();
+
 app.use(allRoutes);
 
 // Attempt to load saved world state on startup
@@ -472,7 +720,13 @@ refreshSummaryCache();
   setInterval(() => {
     const ids = Object.keys(players);
     if (ids.length === 0) return; // nothing to sync
-    io.emit('PLAYERS_SYNC', { players: snapshotPlayersForBroadcast() });
+    const syncData = { players: snapshotPlayersForBroadcast() };
+    // Use UDP for this high-freq sync when available
+    if (udpReady) {
+      udp.emitAll('PLAYERS_SYNC', syncData);
+    } else {
+      io.emit('PLAYERS_SYNC', syncData);
+    }
   }, 5000);
 
   function newConnection(socket) {
@@ -497,6 +751,12 @@ refreshSummaryCache();
       // Send all existing players so the new client can see everyone
       io.to(socket.id).emit('OLD_DATA', { players: snapshotPlayersForBroadcast() });
       io.to(socket.id).emit('YOUR_ID', { id: socket.id });
+
+      // Send UDP auth token so client can establish WebRTC DataChannel
+      if (udpReady) {
+        const udpToken = udp.generateUdpToken(socket.id);
+        io.to(socket.id).emit('UDP_TOKEN', { token: udpToken });
+      }
 
       // Skip sending SERVER_SUMMARY to avoid large/circular payloads for now
 
@@ -906,6 +1166,7 @@ refreshSummaryCache();
         players[socket.id] = [];
         delete players[socket.id];
         socketChunkRooms.delete(socket.id);
+        udp.removeChannel(socket.id); // Clean up UDP channel
 
         io.emit('REMOVE_PLAYER', socket.id);
         // send message
@@ -939,7 +1200,12 @@ refreshSummaryCache();
           if (coords) {
             const rooms = getNeighborRooms(coords.cx, coords.cy);
             for (const room of rooms) {
-              socket.to(room).emit('UPDATE_POS', normalizedData);
+              // Use UDP for high-freq position updates
+              if (udpReady) {
+                udp.broadcastToRoom(room, 'UPDATE_POS', normalizedData);
+              } else {
+                socket.to(room).emit('UPDATE_POS', normalizedData);
+              }
             }
           } else {
             socket.broadcast.emit('UPDATE_POS', normalizedData);
@@ -1010,10 +1276,14 @@ refreshSummaryCache();
 
         const emitToNearby = (event, payload) => {
           if (playerCoords) {
-            // Emit to the player's 3x3 chunk room grid
+            // Emit to the player's 3x3 chunk room grid via UDP when available
             const rooms = getNeighborRooms(playerCoords.cx, playerCoords.cy);
             for (const room of rooms) {
-              socket.to(room).emit(event, payload);
+              if (udpReady) {
+                udp.broadcastToRoom(room, event, payload);
+              } else {
+                socket.to(room).emit(event, payload);
+              }
             }
           } else {
             socket.broadcast.emit(event, payload);
@@ -1038,7 +1308,11 @@ refreshSummaryCache();
 
       // Broadcast explosion events to nearby clients
       socket.on('EXPLOSION', (data) => {
-        socket.broadcast.emit('EXPLOSION', data);
+        if (udpReady) {
+          udp.emitAll('EXPLOSION', data);
+        } else {
+          socket.broadcast.emit('EXPLOSION', data);
+        }
       });
 
       // Sync movesSlots from client
@@ -1569,6 +1843,10 @@ refreshSummaryCache();
         }
 
         io.to(chunkRoom(data.cx, data.cy)).emit('UPDATE_NODES', data);
+        // Also broadcast via UDP for faster delivery
+        if (udpReady) {
+          udp.broadcastToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_NODES', data);
+        }
       }
 
       socket.on('update_iron_nodes', update_iron_nodes);
@@ -1689,6 +1967,10 @@ refreshSummaryCache();
           });
         }
         io.to(chunkRoom(data.cx, data.cy)).emit('UPDATE_IRON_NODES', data);
+        // Also broadcast via UDP for faster delivery
+        if (udpReady) {
+          udp.broadcastToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_IRON_NODES', data);
+        }
       }
 
       socket.on('new_object', new_object);
@@ -1879,7 +2161,12 @@ refreshSummaryCache();
         if (chunk) {
           chunk.projectiles.push(data);
         }
-        socket.broadcast.emit('NEW_PROJECTILE', data);
+        // Use UDP for high-freq projectile broadcasts
+        if (udpReady) {
+          udp.emitAll('NEW_PROJECTILE', data);
+        } else {
+          socket.broadcast.emit('NEW_PROJECTILE', data);
+        }
       }
 
       socket.on('delete_proj', delete_projectile);
@@ -1899,7 +2186,12 @@ refreshSummaryCache();
           // Match by ID - most reliable identifier
           if (data.id == chunk.projectiles[i].id) {
             chunk.projectiles.splice(i, 1);
-            socket.broadcast.emit('DELETE_PROJ', data);
+            // Use UDP for high-freq projectile deletion
+            if (udpReady) {
+              udp.emitAll('DELETE_PROJ', data);
+            } else {
+              socket.broadcast.emit('DELETE_PROJ', data);
+            }
             break; // Exit after first match since IDs are unique
           }
         }
@@ -1911,7 +2203,12 @@ refreshSummaryCache();
         //add sounds to server map
         let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
         chunk.soundObjs.push(data);
-        socket.broadcast.emit('NEW_SOUND', data);
+        // Use UDP for sound broadcasts
+        if (udpReady) {
+          udp.emitAll('NEW_SOUND', data);
+        } else {
+          socket.broadcast.emit('NEW_SOUND', data);
+        }
       }
 
       socket.on('delete_sound', delete_sound);
@@ -1941,7 +2238,12 @@ refreshSummaryCache();
               y: data.pos.y + Math.sin(angle) * 100,
             };
 
-            io.emit('WANDER_TARGET', { id: data.id, target: target });
+            // Use UDP for wander target broadcasts
+            if (udpReady) {
+              udp.emitAll('WANDER_TARGET', { id: data.id, target: target });
+            } else {
+              io.emit('WANDER_TARGET', { id: data.id, target: target });
+            }
             serverMap.brains[i].target = target;
 
             i = serverMap.brains.length;
@@ -2170,17 +2472,30 @@ setInterval(() => {
         updated = true;
       }
       
-      // Broadcast update to all clients
+      // Broadcast update to all clients via UDP when available
       if (updated) {
         const coords = chunkCoordsFromPos(p.pos);
-        const target = coords ? io.to(chunkRoom(coords.cx, coords.cy)) : io;
-        target.emit('UPDATE_PLAYER', {
+        const payload = {
           id: id,
           pos: normalizePos(p.pos),
           holding: cloneHolding(p.holding),
           update_names: updateNames,
           update_values: updateValues
-        });
+        };
+        if (coords) {
+          const room = chunkRoom(coords.cx, coords.cy);
+          if (udpReady) {
+            udp.broadcastToRoom(room, 'UPDATE_PLAYER', payload);
+          } else {
+            io.to(room).emit('UPDATE_PLAYER', payload);
+          }
+        } else {
+          if (udpReady) {
+            udp.emitAll('UPDATE_PLAYER', payload);
+          } else {
+            io.emit('UPDATE_PLAYER', payload);
+          }
+        }
       }
     });
   }
@@ -2212,7 +2527,11 @@ setInterval(() => {
       }
     }
     for (const room of healedRooms) {
-      io.to(room).emit('HEAL_PLANTS', {});
+      if (udpReady) {
+        udp.broadcastToRoom(room, 'HEAL_PLANTS', {});
+      } else {
+        io.to(room).emit('HEAL_PLANTS', {});
+      }
     }
   }
 
@@ -2238,8 +2557,8 @@ setInterval(() => {
             obj.mhp += 10;
           }
           
-          // Broadcast entity level update
-          io.to(chunkRoom(chunk.cx, chunk.cy)).emit('ENTITY_LEVEL_UPDATE', {
+          // Broadcast entity level update via UDP when available
+          const levelPayload = {
             cx: chunk.cx,
             cy: chunk.cy,
             objPos: obj.pos,
@@ -2247,7 +2566,12 @@ setInterval(() => {
             xp: obj.xp,
             hp: obj.hp,
             mhp: obj.mhp
-          });
+          };
+          if (udpReady) {
+            udp.broadcastToRoom(chunkRoom(chunk.cx, chunk.cy), 'ENTITY_LEVEL_UPDATE', levelPayload);
+          } else {
+            io.to(chunkRoom(chunk.cx, chunk.cy)).emit('ENTITY_LEVEL_UPDATE', levelPayload);
+          }
         }
       }
     }
@@ -2255,10 +2579,15 @@ setInterval(() => {
 
   // Broadcast timer more frequently near end for sync
   if (countdown % 5 === 0 || countdown <= 15) {
-    io.emit('sync_time', {
+    const timeData = {
       totalSeconds: countdown,
       endsAt: timerEndAt,
-    });
+    };
+    if (udpReady) {
+      udp.emitAll('sync_time', timeData);
+    } else {
+      io.emit('sync_time', timeData);
+    }
   }
 
   // Capture a pre-restart snapshot a few seconds before shutdown so clients have data
