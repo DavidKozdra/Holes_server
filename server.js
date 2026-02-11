@@ -624,6 +624,98 @@ udpClientHandlers['update_iron_node'] = (data, socketId) => {
   bufferNodeUpdate(chunkPos[0], chunkPos[1], data, true);
 };
 
+// update_nodes: Multi-node terrain digging (explosions)
+udpClientHandlers['update_nodes'] = (data, socketId) => {
+  if (!data || data.cx == null || data.cy == null) return;
+  let chunk = serverMap.getChunk(data.cx, data.cy);
+  if (!chunk) return;
+  let posX = Math.round(data.pos.x / TILESIZE);
+  let posY = Math.round(data.pos.y / TILESIZE);
+  posX = posX - data.cx * CHUNKSIZE;
+  posY = posY - data.cy * CHUNKSIZE;
+  for (let x = posX - data.radius; x <= posX + data.radius; x++) {
+    for (let y = posY - data.radius; y <= posY + data.radius; y++) {
+      if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
+        let index = x + y * CHUNKSIZE;
+        if (data.amt > 0) {
+          if (chunk.data[index] > 0) chunk.data[index] -= data.amt;
+          if (chunk.data[index] < 0.3 && chunk.data[index] !== -1) chunk.data[index] = 0;
+        } else {
+          if (chunk.data[index] < 1.3 && chunk.data[index] !== -1) chunk.data[index] -= data.amt;
+          if (chunk.data[index] > 1.3) chunk.data[index] = 1.3;
+        }
+      } else {
+        let tempChunk;
+        let index;
+        if (y < 0 && x >= 0 && x < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx, data.cy - 1); index = x + 1 + y * CHUNKSIZE; }
+        else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx, data.cy + 1); index = x - 1 + (y - CHUNKSIZE) * CHUNKSIZE; }
+        else if (x < 0 && y >= 0 && y < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx - 1, data.cy); index = (CHUNKSIZE + x) + y * CHUNKSIZE; }
+        else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx + 1, data.cy); index = (x - CHUNKSIZE) + y * CHUNKSIZE; }
+        else if (x < 0 && y < 0) { tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1); index = (CHUNKSIZE + x + 1) + (CHUNKSIZE + y) * CHUNKSIZE; }
+        else if (x >= CHUNKSIZE && y < 0) { tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1); index = (x - CHUNKSIZE + 1) + (CHUNKSIZE + y) * CHUNKSIZE; }
+        else if (x < 0 && y >= CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1); index = (CHUNKSIZE + x - 1) + (y - CHUNKSIZE) * CHUNKSIZE; }
+        else if (x >= CHUNKSIZE && y >= CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1); index = (x - CHUNKSIZE - 1) + (y - CHUNKSIZE) * CHUNKSIZE; }
+        if (tempChunk != undefined && index != undefined) {
+          if (data.amt > 0) {
+            if (tempChunk.data[index] > 0) tempChunk.data[index] -= data.amt;
+            if (tempChunk.data[index] < 0.3 && tempChunk.data[index] !== -1) tempChunk.data[index] = 0;
+          } else {
+            if (tempChunk.data[index] < 1.3 && tempChunk.data[index] !== -1) tempChunk.data[index] -= data.amt;
+            if (tempChunk.data[index] > 1.3) tempChunk.data[index] = 1.3;
+          }
+        }
+      }
+    }
+  }
+  emitToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_NODES', data);
+};
+
+// update_iron_nodes: Multi-node iron mining (explosions)
+udpClientHandlers['update_iron_nodes'] = (data, socketId) => {
+  if (!data || data.cx == null || data.cy == null) return;
+  let chunk = serverMap.getChunk(data.cx, data.cy);
+  if (!chunk) return;
+  let posX = Math.round(data.pos.x / TILESIZE);
+  let posY = Math.round(data.pos.y / TILESIZE);
+  posX = posX - data.cx * CHUNKSIZE;
+  posY = posY - data.cy * CHUNKSIZE;
+  for (let x = posX - data.radius; x <= posX + data.radius; x++) {
+    for (let y = posY - data.radius; y <= posY + data.radius; y++) {
+      if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
+        let index = x + y * CHUNKSIZE;
+        if (data.amt > 0) {
+          if (chunk.iron_data[index] > 0) chunk.iron_data[index] -= data.amt;
+          if (chunk.iron_data[index] < 0.3 && chunk.iron_data[index] !== -1) chunk.iron_data[index] = 0;
+        } else {
+          if (chunk.iron_data[index] < 1.3 && chunk.iron_data[index] !== -1) chunk.iron_data[index] -= data.amt;
+          if (chunk.iron_data[index] > 1.3) chunk.iron_data[index] = 1.3;
+        }
+      } else {
+        let tempChunk;
+        let index;
+        if (y < 0 && x >= 0 && x < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx, data.cy - 1); index = x + 1 + y * CHUNKSIZE; }
+        else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx, data.cy + 1); index = x - 1 + (y - CHUNKSIZE) * CHUNKSIZE; }
+        else if (x < 0 && y >= 0 && y < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx - 1, data.cy); index = (CHUNKSIZE + x) + y * CHUNKSIZE; }
+        else if (x >= CHUNKSIZE && y >= 0 && y < CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx + 1, data.cy); index = (x - CHUNKSIZE) + y * CHUNKSIZE; }
+        else if (x < 0 && y < 0) { tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1); index = (CHUNKSIZE + x + 1) + (CHUNKSIZE + y) * CHUNKSIZE; }
+        else if (x >= CHUNKSIZE && y < 0) { tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1); index = (x - CHUNKSIZE + 1) + (CHUNKSIZE + y) * CHUNKSIZE; }
+        else if (x < 0 && y >= CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1); index = (CHUNKSIZE + x - 1) + (y - CHUNKSIZE) * CHUNKSIZE; }
+        else if (x >= CHUNKSIZE && y >= CHUNKSIZE) { tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1); index = (x - CHUNKSIZE - 1) + (y - CHUNKSIZE) * CHUNKSIZE; }
+        if (tempChunk != undefined && index != undefined) {
+          if (data.amt > 0) {
+            if (tempChunk.iron_data[index] > 0) tempChunk.iron_data[index] -= data.amt;
+            if (tempChunk.iron_data[index] < 0.3 && tempChunk.iron_data[index] !== -1) tempChunk.iron_data[index] = 0;
+          } else {
+            if (tempChunk.iron_data[index] < 1.3 && tempChunk.iron_data[index] !== -1) tempChunk.iron_data[index] -= data.amt;
+            if (tempChunk.iron_data[index] > 1.3) tempChunk.iron_data[index] = 1.3;
+          }
+        }
+      }
+    }
+  }
+  emitToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_IRON_NODES', data);
+};
+
 // EXPLOSION: Visual effect broadcast
 udpClientHandlers['EXPLOSION'] = (data, socketId) => {
   if (!data) return;
