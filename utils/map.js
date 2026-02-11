@@ -404,11 +404,14 @@ class Chunk {
       if (Math.random() < 0.4)
         temp.invBlock.items['Black Gem'] = { amount: Math.floor(Math.random() * 5) + 1 };
       this.objects.push(temp);
-      for (let x = sructX - 5; x < sructX + 5; x++) {
-        for (let y = structY - 5; y < structY + 5; y++) {
-          if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
-            this.data[x + y * CHUNKSIZE] = 0;
-            this.iron_data[x + y * CHUNKSIZE] = 0;
+      // ~1 in 4 chests stay buried under dirt; the rest clear the area around them
+      if (Math.random() > 0.25) {
+        for (let x = sructX - 5; x < sructX + 5; x++) {
+          for (let y = structY - 5; y < structY + 5; y++) {
+            if (x >= 0 && x < CHUNKSIZE && y >= 0 && y < CHUNKSIZE) {
+              this.data[x + y * CHUNKSIZE] = 0;
+              this.iron_data[x + y * CHUNKSIZE] = 0;
+            }
           }
         }
       }
