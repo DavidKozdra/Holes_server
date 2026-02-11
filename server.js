@@ -347,6 +347,10 @@ const SUMMARY_INTERVAL_MS = parseInt(process.env.SUMMARY_INTERVAL_MS || '30000',
 const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag', "kike"]
 const badWordRegex = new RegExp(badWords.join('|'), 'i');
 
+// Trust the first proxy (nginx, Cloudflare, etc.) so that
+// express-rate-limit and req.ip use the real client IP from X-Forwarded-For.
+app.set('trust proxy', 3);
+
 // ── Security & Performance Middleware ──
 app.use(helmet({
   contentSecurityPolicy: false, // CSP is set in the HTML meta tag; avoid conflicts
