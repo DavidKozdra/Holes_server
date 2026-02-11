@@ -1011,10 +1011,10 @@ let isShuttingDown = false;
       //all lower means it came from the client
 
       // ── Socket-level rate limiting ──
-      // Tracks messages per second per socket to prevent spam/flooding
+      // Uses socket.use() middleware so excess events are actually blocked
+      // (onAny is passive and cannot prevent event handlers from running)
       const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 240, warned: false };
-      const _origOnEvent = socket.onAny ? null : undefined; // onAny available in Socket.IO 4+
-      socket.onAny(() => {
+      socket.use((packet, next) => {
         const now = Date.now();
         if (now - socketRateLimit.lastReset > 1000) {
           socketRateLimit.count = 0;
@@ -1027,9 +1027,10 @@ let isShuttingDown = false;
             console.warn(`[RateLimit] Socket ${socket.id} exceeded ${socketRateLimit.MAX_PER_SEC} events/sec`);
             socketRateLimit.warned = true;
           }
-          // Don't disconnect immediately — just drop excess events silently
+          // Don't call next() — event is actually dropped
           return;
         }
+        next();
       });
 
       // Enforce max players: if full, notify and disconnect immediately
