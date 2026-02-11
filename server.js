@@ -153,9 +153,8 @@ function flushNodeBuffers() {
         // Use UDP for high-freq node updates when available
         if (udpReady) {
           udp.broadcastToRoom(room, eventName, payload);
-        } else {
-          io.to(room).emit(eventName, payload);
         }
+        io.to(room).emit(eventName, payload);
       }
     }
   };
@@ -391,9 +390,8 @@ let udpReady = false;
 function emitToPlayer(socketId, event, data) {
   if (udpReady && udp.hasChannel(socketId)) {
     udp.sendToPlayer(socketId, event, data);
-  } else {
-    io.to(socketId).emit(event, data);
   }
+  io.to(socketId).emit(event, data);
 }
 
 // Helper: emit to a room via UDP if available, else Socket.IO
@@ -724,9 +722,8 @@ refreshSummaryCache();
     // Use UDP for this high-freq sync when available
     if (udpReady) {
       udp.emitAll('PLAYERS_SYNC', syncData);
-    } else {
-      io.emit('PLAYERS_SYNC', syncData);
     }
+    io.emit('PLAYERS_SYNC', syncData);
   }, 5000);
 
   function newConnection(socket) {
@@ -1203,9 +1200,8 @@ refreshSummaryCache();
               // Use UDP for high-freq position updates
               if (udpReady) {
                 udp.broadcastToRoom(room, 'UPDATE_POS', normalizedData);
-              } else {
-                socket.to(room).emit('UPDATE_POS', normalizedData);
               }
+              socket.to(room).emit('UPDATE_POS', normalizedData);
             }
           } else {
             socket.broadcast.emit('UPDATE_POS', normalizedData);
@@ -1281,9 +1277,8 @@ refreshSummaryCache();
             for (const room of rooms) {
               if (udpReady) {
                 udp.broadcastToRoom(room, event, payload);
-              } else {
-                socket.to(room).emit(event, payload);
               }
+              socket.to(room).emit(event, payload);
             }
           } else {
             socket.broadcast.emit(event, payload);
@@ -1310,9 +1305,8 @@ refreshSummaryCache();
       socket.on('EXPLOSION', (data) => {
         if (udpReady) {
           udp.emitAll('EXPLOSION', data);
-        } else {
-          socket.broadcast.emit('EXPLOSION', data);
         }
+        socket.broadcast.emit('EXPLOSION', data);
       });
 
       // Sync movesSlots from client
@@ -2164,9 +2158,8 @@ refreshSummaryCache();
         // Use UDP for high-freq projectile broadcasts
         if (udpReady) {
           udp.emitAll('NEW_PROJECTILE', data);
-        } else {
-          socket.broadcast.emit('NEW_PROJECTILE', data);
         }
+        socket.broadcast.emit('NEW_PROJECTILE', data);
       }
 
       socket.on('delete_proj', delete_projectile);
@@ -2189,9 +2182,8 @@ refreshSummaryCache();
             // Use UDP for high-freq projectile deletion
             if (udpReady) {
               udp.emitAll('DELETE_PROJ', data);
-            } else {
-              socket.broadcast.emit('DELETE_PROJ', data);
             }
+            socket.broadcast.emit('DELETE_PROJ', data);
             break; // Exit after first match since IDs are unique
           }
         }
@@ -2206,9 +2198,8 @@ refreshSummaryCache();
         // Use UDP for sound broadcasts
         if (udpReady) {
           udp.emitAll('NEW_SOUND', data);
-        } else {
-          socket.broadcast.emit('NEW_SOUND', data);
         }
+        socket.broadcast.emit('NEW_SOUND', data);
       }
 
       socket.on('delete_sound', delete_sound);
@@ -2241,9 +2232,8 @@ refreshSummaryCache();
             // Use UDP for wander target broadcasts
             if (udpReady) {
               udp.emitAll('WANDER_TARGET', { id: data.id, target: target });
-            } else {
-              io.emit('WANDER_TARGET', { id: data.id, target: target });
             }
+            io.emit('WANDER_TARGET', { id: data.id, target: target });
             serverMap.brains[i].target = target;
 
             i = serverMap.brains.length;
@@ -2486,15 +2476,13 @@ setInterval(() => {
           const room = chunkRoom(coords.cx, coords.cy);
           if (udpReady) {
             udp.broadcastToRoom(room, 'UPDATE_PLAYER', payload);
-          } else {
-            io.to(room).emit('UPDATE_PLAYER', payload);
           }
+          io.to(room).emit('UPDATE_PLAYER', payload);
         } else {
           if (udpReady) {
             udp.emitAll('UPDATE_PLAYER', payload);
-          } else {
-            io.emit('UPDATE_PLAYER', payload);
           }
+          io.emit('UPDATE_PLAYER', payload);
         }
       }
     });
@@ -2529,9 +2517,8 @@ setInterval(() => {
     for (const room of healedRooms) {
       if (udpReady) {
         udp.broadcastToRoom(room, 'HEAL_PLANTS', {});
-      } else {
-        io.to(room).emit('HEAL_PLANTS', {});
       }
+      io.to(room).emit('HEAL_PLANTS', {});
     }
   }
 
@@ -2569,9 +2556,8 @@ setInterval(() => {
           };
           if (udpReady) {
             udp.broadcastToRoom(chunkRoom(chunk.cx, chunk.cy), 'ENTITY_LEVEL_UPDATE', levelPayload);
-          } else {
-            io.to(chunkRoom(chunk.cx, chunk.cy)).emit('ENTITY_LEVEL_UPDATE', levelPayload);
           }
+          io.to(chunkRoom(chunk.cx, chunk.cy)).emit('ENTITY_LEVEL_UPDATE', levelPayload);
         }
       }
     }
@@ -2585,9 +2571,8 @@ setInterval(() => {
     };
     if (udpReady) {
       udp.emitAll('sync_time', timeData);
-    } else {
-      io.emit('sync_time', timeData);
     }
+    io.emit('sync_time', timeData);
   }
 
   // Capture a pre-restart snapshot a few seconds before shutdown so clients have data
