@@ -1012,7 +1012,7 @@ let isShuttingDown = false;
 
       // ── Socket-level rate limiting ──
       // Tracks messages per second per socket to prevent spam/flooding
-      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 2400, warned: false };
+      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 240, warned: false };
       const _origOnEvent = socket.onAny ? null : undefined; // onAny available in Socket.IO 4+
       socket.onAny(() => {
         const now = Date.now();
@@ -1485,7 +1485,7 @@ let isShuttingDown = false;
 
       function update_pos(data) {
         if (!players[data.id]) {
-          console.error(`Player with id ${data.id} not found.`);
+          // Silently ignore — normal race condition during reconnect/disconnect
           return;
         }
 
@@ -1527,7 +1527,7 @@ let isShuttingDown = false;
 
       function update_player(data) {
         if (!players[data.id]) {
-          console.error(`Player with id ${data.id} not found.`);
+          // Silently ignore — normal race condition during reconnect/disconnect
           return;
         }
         // Verify the sender owns this player
