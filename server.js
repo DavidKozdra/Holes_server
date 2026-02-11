@@ -831,6 +831,11 @@ refreshSummaryCache();
         io.to(socket.id).emit('sync_time', { minutes, seconds, totalSeconds: countdown, endsAt: timerEndAt });
       }
 
+      // ── App-level heartbeat: reply to client pings ──
+      socket.on('app_ping', (data) => {
+        socket.emit('app_pong', data);
+      });
+
       socket.on('new_player', new_player);
       function new_player(data = {}, ack) {
         const reply = (payload) => {
