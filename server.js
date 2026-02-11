@@ -1025,6 +1025,11 @@ let isShuttingDown = false;
         'player_leave',       // Logout — one-shot
         'disconnect',         // Socket.IO internal
         'set_password',       // Auth — rare
+        'get_chunk',          // Map loading — burst of 25 on join
+        'request_my_items',   // Inventory restore — one-shot on join
+        'get_teams',          // Team sync — one-shot on join
+        'get_portals',        // Portal sync — one-shot
+        'save_player_state',  // Explicit save — rare
       ]);
       const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 200, warned: false };
       socket.use((packet, next) => {
@@ -1086,6 +1091,10 @@ let isShuttingDown = false;
       // ── App-level heartbeat: reply to client pings ──
       socket.on('app_ping', (data) => {
         socket.emit('app_pong', data);
+        // Debug: log heartbeat round-trip (remove once connection issue is resolved)
+        if (data && data.t) {
+          console.log(`[Heartbeat] Ping from ${socket.id}, latency: ${Date.now() - data.t}ms`);
+        }
       });
 
       socket.on('new_player', new_player);
@@ -1453,9 +1462,9 @@ let isShuttingDown = false;
 
       socket.on('disconnect', disconnect);
 
-      function disconnect(data) {
-        try { logger.info('Client disconnected', { id: socket.id }); } catch {}
-        console.log(socket.id + ' disconnected');
+      function disconnect(reason) {
+        try { logger.info('Client disconnected', { id: socket.id, reason }); } catch {}
+        console.log(socket.id + ' disconnected (reason: ' + reason + ')');
         if (players[socket.id] != undefined) {
           console.log(
             '{\n' +
