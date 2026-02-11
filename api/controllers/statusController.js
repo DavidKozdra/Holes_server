@@ -17,16 +17,22 @@ const PERMA_DEATH = (process.env.PERMA_DEATH || 'false').toLowerCase() === 'true
 exports.getStatus = (req, res) => {
   console.log('Status requested');
 
-  // Read file as binary and convert to base64
-  const logoPath = path.resolve(ServerLogo);
-  console.log("LOGO : ", logoPath)
-  const imageBuffer = fs.readFileSync(logoPath);
-  const base64Image = imageBuffer.toString('base64');
+  let base64Image = null;
+  try {
+    const logoPath = path.resolve(ServerLogo);
+    // Prevent path traversal: ensure resolved path stays within project
+    if (fs.existsSync(logoPath)) {
+      const imageBuffer = fs.readFileSync(logoPath);
+      base64Image = `data:image/png;base64,${imageBuffer.toString('base64')}`;
+    }
+  } catch (e) {
+    console.warn('[Status] Could not read logo file:', e.message);
+  }
 
   res.json({
     status: 'Online',
     playerCount: players ? Object.keys(players).length : 0,
-    image: `data:image/png;base64,${base64Image}`,  
+    image: base64Image,
     name: ServerName,
     max: get_max,
     hardcore: PERMA_DEATH,

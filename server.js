@@ -1,6 +1,9 @@
 const express = require('express');
 const socket = require('socket.io');
 const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const { validColors } = require('./utils/color');
 const { Map: GameMap, Chunk, Placeable, TILESIZE, CHUNKSIZE } = require('./utils/map');
 const { loadState, clearState, enqueueSave } = require('./utils/persistence');
@@ -338,36 +341,74 @@ const allRoutes = require('./api/routes/Routes');
 const port = process.env.PORT || 3000;
 const app = express();
 const MAX_PLAYERS = parseInt(process.env.MAX, 10) || 10;
-const SAVE_INTERVAL_HOURS = parseFloat(process.env.SAVE_INTERVAL_HOURS || '3');
+const SAVE_INTERVAL_HOURS = parseFloat(process.env.SAVE_INTERVAL_HOURS || '0.25');
 const SUMMARY_INTERVAL_MS = parseInt(process.env.SUMMARY_INTERVAL_MS || '30000', 10);
 
 const badWords = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag', "kike"]
 const badWordRegex = new RegExp(badWords.join('|'), 'i');
 
-app.use(express.json());           // parse JSON bodies (needed by /api/save-player-data)
+// ── Security & Performance Middleware ──
+app.use(helmet({
+  contentSecurityPolicy: false, // CSP is set in the HTML meta tag; avoid conflicts
+  crossOriginEmbedderPolicy: false, // Allow loading cross-origin scripts (p5.js CDN, etc.)
+}));
+app.use(compression());           // gzip all responses
+
+// Parse JSON bodies with a size limit to prevent abuse
+app.use(express.json({ limit: '50kb' }));
+
+// CORS — restrict to known origins in production
+const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',')
+  : true; // Default: reflect any origin (set CORS_ORIGINS in .env for production)
 app.use(
   cors({
-    origin: true, // This automatically reflects the request's origin
+    origin: ALLOWED_ORIGINS,
     methods: ['GET', 'POST'],
     credentials: true,
   }),
 );
 
+// ── Rate Limiting ──
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,  // 1 minute
+  max: 60,              // 60 requests per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+});
+app.use('/api', apiLimiter);
+
+// ── Health Check Endpoint ──
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    players: Object.keys(players).length,
+    maxPlayers: MAX_PLAYERS,
+    timestamp: Date.now(),
+  });
+});
+
 const ServerWelcomeNewMessage = process.env.Server_Welcome || 'Please Welcome';
 const ServerWelcomeReturningMessage = process.env.Server_Welcome_Returning || 'Welcome back';
 const path = require('path');
 
-// Serve static files using an absolute path
-app.use(express.static(path.join(__dirname, '../Holes_Client')));
+// Serve static files with caching headers
+app.use(express.static(path.join(__dirname, '../Holes_Client'), {
+  maxAge: process.env.NODE_ENV === 'production' ? '1d' : 0,
+  etag: true,
+}));
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Server is running on http://localhost:${port}`);
   try { logger.info('Server started', { port }); } catch {}
 });
 
-// Configure Socket.io with CORS
+// Configure Socket.io with CORS (mirrors Express CORS config)
 const io = socket(server, {
   cors: {
-    origin: '*',
+    origin: ALLOWED_ORIGINS,
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -764,11 +805,90 @@ setInterval(() => {
 // Prime caches on startup
 refreshSummaryCache();
 
-// Save on graceful shutdown
+// ── Memory Management: Chunk Eviction & Stale Data Pruning ──
+// Unload chunks that have no players nearby to prevent unbounded memory growth.
+// Also prune stale kills_deaths entries from disconnected players.
+const CHUNK_EVICTION_INTERVAL_MS = 60 * 1000; // Run every 60s
+const CHUNK_KEEP_RADIUS = 4; // Keep chunks within 4 chunks of any player
+
+setInterval(() => {
+  const playerPositions = [];
+  for (const id of Object.keys(players)) {
+    const p = players[id];
+    if (p && p.pos && Number.isFinite(p.pos.x) && Number.isFinite(p.pos.y)) {
+      playerPositions.push({
+        cx: Math.floor(p.pos.x / (TILESIZE * CHUNKSIZE)),
+        cy: Math.floor(p.pos.y / (TILESIZE * CHUNKSIZE)),
+      });
+    }
+  }
+
+  // Evict chunks far from all players
+  const chunkKeys = Object.keys(serverMap.chunks || {});
+  let evictedCount = 0;
+  for (let i = 0; i < chunkKeys.length; i++) {
+    const chunk = serverMap.chunks[chunkKeys[i]];
+    if (!chunk) continue;
+    // Check if any player is within CHUNK_KEEP_RADIUS
+    let isNearby = false;
+    for (let j = 0; j < playerPositions.length; j++) {
+      const dx = Math.abs(chunk.cx - playerPositions[j].cx);
+      const dy = Math.abs(chunk.cy - playerPositions[j].cy);
+      if (dx <= CHUNK_KEEP_RADIUS && dy <= CHUNK_KEEP_RADIUS) {
+        isNearby = true;
+        break;
+      }
+    }
+    // Only evict empty chunks (no objects, no player-built structures)
+    if (!isNearby && (!chunk.objects || chunk.objects.length === 0)) {
+      delete serverMap.chunks[chunkKeys[i]];
+      evictedCount++;
+    }
+  }
+  if (evictedCount > 0) {
+    console.log(`[Memory] Evicted ${evictedCount} empty chunks far from players`);
+  }
+
+  // Prune stale kills_deaths entries (keep only for currently connected players)
+  const connectedIds = new Set(Object.keys(players));
+  for (const id of Object.keys(kills_deaths)) {
+    if (!connectedIds.has(id)) {
+      delete kills_deaths[id];
+    }
+  }
+}, CHUNK_EVICTION_INTERVAL_MS);
+
+// ── Crash Handlers ──
+// Prevent silent crashes from killing the server without saving
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err);
+  try { logger.error('Uncaught exception', { message: err.message, stack: err.stack }); } catch {}
+  // Attempt an emergency save before crashing
+  queueWorldSave('uncaught-exception').catch(() => {}).finally(() => {
+    process.exit(1);
+  });
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled promise rejection:', reason);
+  try { logger.error('Unhandled rejection', { message: String(reason), stack: reason?.stack }); } catch {}
+  // Don't exit — log and continue. Node 18+ would crash by default.
+});
+
+// ── Graceful Shutdown ──
+// Await the save before exiting so data is actually persisted
+let isShuttingDown = false;
 ['SIGINT', 'SIGTERM'].forEach((sig) => {
-  process.on(sig, () => {
+  process.on(sig, async () => {
+    if (isShuttingDown) return; // Prevent double-shutdown
+    isShuttingDown = true;
     console.log(`[Persistence] Received ${sig}, saving world state...`);
-    queueWorldSave('cli-delete');
+    try {
+      await queueWorldSave('graceful-shutdown');
+      console.log('[Persistence] Save complete. Exiting.');
+    } catch (e) {
+      console.error('[Persistence] Save failed during shutdown:', e);
+    }
     process.exit(0);
   });
 });
@@ -797,6 +917,28 @@ refreshSummaryCache();
     try {
       //all caps means it came from the server
       //all lower means it came from the client
+
+      // ── Socket-level rate limiting ──
+      // Tracks messages per second per socket to prevent spam/flooding
+      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 60, warned: false };
+      const _origOnEvent = socket.onAny ? null : undefined; // onAny available in Socket.IO 4+
+      socket.onAny(() => {
+        const now = Date.now();
+        if (now - socketRateLimit.lastReset > 1000) {
+          socketRateLimit.count = 0;
+          socketRateLimit.lastReset = now;
+          socketRateLimit.warned = false;
+        }
+        socketRateLimit.count++;
+        if (socketRateLimit.count > socketRateLimit.MAX_PER_SEC) {
+          if (!socketRateLimit.warned) {
+            console.warn(`[RateLimit] Socket ${socket.id} exceeded ${socketRateLimit.MAX_PER_SEC} events/sec`);
+            socketRateLimit.warned = true;
+          }
+          // Don't disconnect immediately — just drop excess events silently
+          return;
+        }
+      });
 
       // Enforce max players: if full, notify and disconnect immediately
       const currentPlayers = Object.keys(players).length;
@@ -1279,17 +1421,38 @@ refreshSummaryCache();
 
       socket.on('update_player', update_player);
 
+      // Whitelist of fields clients are allowed to set via update_player
+      const ALLOWED_UPDATE_FIELDS = new Set([
+        'stats.hp', 'stats.mp', 'stats.mhp', 'stats.mmp',
+        'stats.attack', 'stats.magic', 'stats.magicResistance',
+        'stats.luck', 'stats.runningSpeed', 'stats.healthRegen',
+        'statBlock.level', 'statBlock.xp', 'statBlock.xpNeeded',
+        'forcefieldActive', 'isDashing', 'flashTimer',
+        'particles', 'meditateActive', 'auraTimer',
+        'dashTimer', 'combustionActive', 'isDead',
+        'color', 'maxDirtInv',
+      ]);
+
       function update_player(data) {
         if (!players[data.id]) {
           console.error(`Player with id ${data.id} not found.`);
           return;
         }
+        // Verify the sender owns this player
+        if (data.id !== socket.id) return;
+
+        if (!Array.isArray(data.update_names) || !Array.isArray(data.update_values)) return;
+        if (data.update_names.length !== data.update_values.length) return;
+        // Cap the number of fields per update to prevent abuse
+        const maxFields = Math.min(data.update_names.length, 20);
 
         let hasVisual = false;
         let visualEvents = [];
-        for (let i = 0; i < data.update_names.length; i++) {
+        for (let i = 0; i < maxFields; i++) {
           const name = data.update_names[i];
           const value = data.update_values[i];
+          // Skip fields not in the whitelist
+          if (!ALLOWED_UPDATE_FIELDS.has(name)) continue;
           if (name.includes('stats')) {
             players[data.id].statBlock.stats[name.split('stats.')[1]] = value;
           } else if (name.includes('statBlock')) {
@@ -2334,11 +2497,15 @@ refreshSummaryCache();
         if (!chatMsg || typeof chatMsg.message !== 'string') return;
 
         // Basic sanitization and fallback values
-        const message = chatMsg.message.trim();
+        const MAX_CHAT_LENGTH = 500;
+        let message = chatMsg.message.trim().slice(0, MAX_CHAT_LENGTH);
         if (!message) return;
 
+        // Escape HTML to prevent XSS if client renders as HTML
+        message = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
         const cleanMsg = {
-          user: chatMsg.user || 'Entity',
+          user: (chatMsg.user || 'Entity').slice(0, 32),
           message: badWordRegex.test(message) ? 'I curse at you !!!' : message,
           x: Number.isFinite(chatMsg.x) ? chatMsg.x : 0,
           y: Number.isFinite(chatMsg.y) ? chatMsg.y : 0,
