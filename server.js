@@ -1012,7 +1012,7 @@ let isShuttingDown = false;
 
       // ── Socket-level rate limiting ──
       // Tracks messages per second per socket to prevent spam/flooding
-      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 60, warned: false };
+      const socketRateLimit = { count: 0, lastReset: Date.now(), MAX_PER_SEC: 240, warned: false };
       const _origOnEvent = socket.onAny ? null : undefined; // onAny available in Socket.IO 4+
       socket.onAny(() => {
         const now = Date.now();
