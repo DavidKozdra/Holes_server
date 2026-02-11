@@ -150,11 +150,7 @@ function flushNodeBuffers() {
       const [cx, cy] = key.split(',').map((n) => parseInt(n, 10));
       const room = chunkRoom(cx, cy);
       for (const payload of updates) {
-        // Use UDP for high-freq node updates when available
-        if (udpReady) {
-          udp.broadcastToRoom(room, eventName, payload);
-        }
-        io.to(room).emit(eventName, payload);
+        emitToRoom(room, eventName, payload);
       }
     }
   };
@@ -386,39 +382,101 @@ io.sockets.on('connection', newConnection);
 // with automatic fallback to Socket.IO (TCP) if the UDP channel isn't connected.
 let udpReady = false;
 
-// Helper: emit to a specific player via UDP if available, else Socket.IO
+// ────────────────────────────────────────────────────────────
+// SMART BROADCAST HELPERS
+// ────────────────────────────────────────────────────────────
+// Strategy: Send via UDP to clients that have a DataChannel.
+// Send via Socket.IO ONLY to clients that do NOT have a DataChannel.
+// This eliminates double-delivery while maintaining full coverage.
+
+/** Emit to a specific player — prefer UDP, fall back to Socket.IO. */
 function emitToPlayer(socketId, event, data) {
-  if (udpReady && udp.hasChannel(socketId)) {
-    udp.sendToPlayer(socketId, event, data);
-  }
+  if (udpReady && udp.sendToPlayer(socketId, event, data)) return;
   io.to(socketId).emit(event, data);
 }
 
-// Helper: emit to a room via UDP if available, else Socket.IO
+/** Emit to a Socket.IO room — UDP clients get UDP, others get Socket.IO. */
 function emitToRoom(roomName, event, data) {
-  if (udpReady) {
+  if (udpReady && udp.channelCount() > 0) {
     udp.broadcastToRoom(roomName, event, data);
+    // Also send via Socket.IO for non-UDP clients in the room
+    _emitToRoomExcludingUdp(roomName, event, data);
+  } else {
+    io.to(roomName).emit(event, data);
   }
-  // Always also emit via Socket.IO for clients without UDP
-  io.to(roomName).emit(event, data);
 }
 
-// Helper: emit to a room excluding a sender via UDP + Socket.IO fallback
+/** Broadcast to a room excluding sender — UDP clients get UDP, others get Socket.IO. */
 function broadcastToRoomFrom(senderSocket, roomName, event, data) {
-  if (udpReady) {
-    udp.broadcastToRoom(roomName, event, data);
+  if (udpReady && udp.channelCount() > 0) {
+    udp.broadcastToRoomExcluding(roomName, event, data, senderSocket.id);
+    _emitToRoomExcludingUdp(roomName, event, data, senderSocket.id);
+  } else {
+    senderSocket.to(roomName).emit(event, data);
   }
-  // Socket.IO broadcast to room excluding sender (for clients without UDP)
-  senderSocket.to(roomName).emit(event, data);
 }
 
-// Helper: emit to all via UDP if available, else Socket.IO
-function emitToAll(event, data) {
-  if (udpReady) {
-    udp.emitAll(event, data);
+/** Emit to ALL connected clients — UDP clients get UDP, others get Socket.IO. */
+function emitToAll(event, data, excludeSocketId) {
+  if (udpReady && udp.channelCount() > 0) {
+    udp.emitAll(event, data, excludeSocketId);
+    // Socket.IO only to sockets WITHOUT a UDP channel
+    const udpSockets = udp.getConnectedSocketIds();
+    for (const [sid, sock] of io.sockets.sockets) {
+      if (sid === excludeSocketId) continue;
+      if (!udpSockets.has(sid)) {
+        sock.emit(event, data);
+      }
+    }
+  } else {
+    if (excludeSocketId) {
+      const sock = io.sockets.sockets.get(excludeSocketId);
+      if (sock) {
+        sock.broadcast.emit(event, data);
+      } else {
+        io.emit(event, data);
+      }
+    } else {
+      io.emit(event, data);
+    }
   }
-  // Also via Socket.IO for non-UDP clients
-  io.emit(event, data);
+}
+
+/** Broadcast to rooms around chunk coords — used for spatial events.
+ *  If excludeSocketId is given, the sender is excluded from all rooms.
+ */
+function emitToNearbyRooms(cx, cy, event, data, excludeSocketId) {
+  const rooms = getNeighborRooms(cx, cy);
+  if (excludeSocketId) {
+    const sock = io.sockets.sockets.get(excludeSocketId);
+    for (let i = 0; i < rooms.length; i++) {
+      if (sock) {
+        broadcastToRoomFrom(sock, rooms[i], event, data);
+      } else {
+        emitToRoom(rooms[i], event, data);
+      }
+    }
+  } else {
+    for (let i = 0; i < rooms.length; i++) {
+      emitToRoom(rooms[i], event, data);
+    }
+  }
+}
+
+/**
+ * Internal: emit via Socket.IO to sockets in a room that do NOT
+ * have an active UDP channel (so they aren't double-delivered).
+ */
+function _emitToRoomExcludingUdp(roomName, event, data, alsoExcludeId) {
+  const room = io.sockets.adapter.rooms.get(roomName);
+  if (!room) return;
+  const udpSockets = udp.getConnectedSocketIds();
+  for (const sid of room) {
+    if (sid === alsoExcludeId) continue;
+    if (udpSockets.has(sid)) continue; // already got it via UDP
+    const sock = io.sockets.sockets.get(sid);
+    if (sock) sock.emit(event, data);
+  }
 }
 
 // UDP client→server message handlers — these mirror the Socket.IO handlers
@@ -473,22 +531,21 @@ udpClientHandlers['update_player'] = (data, socketId) => {
   };
 
   const playerCoords = chunkCoordsFromPos(data.pos);
-  const broadcastUdp = (event, payload) => {
-    if (playerCoords) {
-      const rooms = getNeighborRooms(playerCoords.cx, playerCoords.cy);
-      for (const room of rooms) {
-        udp.broadcastToRoom(room, event, payload);
-      }
-    } else {
-      udp.emitAll(event, payload);
-    }
-  };
 
   if (hasVisual) {
-    broadcastUdp('UPDATE_PLAYER', normalizedData);
-    for (const evt of visualEvents) broadcastUdp('ABILITY_VISUAL', evt);
+    if (playerCoords) {
+      emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData);
+      for (const evt of visualEvents) emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'ABILITY_VISUAL', evt);
+    } else {
+      emitToAll('UPDATE_PLAYER', normalizedData);
+      for (const evt of visualEvents) emitToAll('ABILITY_VISUAL', evt);
+    }
   } else if (data.pos || data.holding) {
-    broadcastUdp('UPDATE_PLAYER', normalizedData);
+    if (playerCoords) {
+      emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData);
+    } else {
+      emitToAll('UPDATE_PLAYER', normalizedData);
+    }
   }
 };
 
@@ -529,7 +586,7 @@ udpClientHandlers['update_iron_node'] = (data, socketId) => {
 // EXPLOSION: Visual effect broadcast
 udpClientHandlers['EXPLOSION'] = (data, socketId) => {
   if (!data) return;
-  udp.emitAll('EXPLOSION', data);
+  emitToAll('EXPLOSION', data, socketId);
 };
 
 // new_proj: Projectile spawned
@@ -544,7 +601,7 @@ udpClientHandlers['new_proj'] = (data, socketId) => {
     let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
     if (chunk) chunk.projectiles.push(data);
   }
-  udp.emitAll('NEW_PROJECTILE', data);
+  emitToAll('NEW_PROJECTILE', data, socketId);
 };
 
 // delete_proj: Projectile removed
@@ -561,7 +618,7 @@ udpClientHandlers['delete_proj'] = (data, socketId) => {
   for (let i = chunk.projectiles.length - 1; i >= 0; i--) {
     if (data.id == chunk.projectiles[i].id) {
       chunk.projectiles.splice(i, 1);
-      udp.emitAll('DELETE_PROJ', data);
+      emitToAll('DELETE_PROJ', data, socketId);
       break;
     }
   }
@@ -572,7 +629,7 @@ udpClientHandlers['new_sound'] = (data, socketId) => {
   if (!data || !data.cPos) return;
   let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
   if (chunk) chunk.soundObjs.push(data);
-  udp.emitAll('NEW_SOUND', data);
+  emitToAll('NEW_SOUND', data, socketId);
 };
 
 // delete_sound: Spatial sound removed
@@ -595,7 +652,7 @@ udpClientHandlers['wander_request'] = (data, socketId) => {
     if (data.id == serverMap.brains[i].id) {
       let angle = Math.random() * 2 * Math.PI;
       let target = { x: data.pos.x + Math.cos(angle) * 100, y: data.pos.y + Math.sin(angle) * 100 };
-      udp.emitAll('WANDER_TARGET', { id: data.id, target: target });
+      emitToAll('WANDER_TARGET', { id: data.id, target: target });
       serverMap.brains[i].target = target;
       break;
     }
@@ -719,11 +776,7 @@ refreshSummaryCache();
     const ids = Object.keys(players);
     if (ids.length === 0) return; // nothing to sync
     const syncData = { players: snapshotPlayersForBroadcast() };
-    // Use UDP for this high-freq sync when available
-    if (udpReady) {
-      udp.emitAll('PLAYERS_SYNC', syncData);
-    }
-    io.emit('PLAYERS_SYNC', syncData);
+    emitToAll('PLAYERS_SYNC', syncData);
   }, 5000);
 
   function newConnection(socket) {
@@ -751,8 +804,7 @@ refreshSummaryCache();
 
       // Send UDP auth token so client can establish WebRTC DataChannel
       if (udpReady) {
-        const udpToken = udp.generateUdpToken(socket.id);
-        io.to(socket.id).emit('UDP_TOKEN', { token: udpToken });
+        io.to(socket.id).emit('UDP_TOKEN', { token: udp.generateUdpToken(socket.id) });
       }
 
       // Skip sending SERVER_SUMMARY to avoid large/circular payloads for now
@@ -1195,16 +1247,9 @@ refreshSummaryCache();
             holding: cloneHolding(data.holding)
           };
           if (coords) {
-            const rooms = getNeighborRooms(coords.cx, coords.cy);
-            for (const room of rooms) {
-              // Use UDP for high-freq position updates
-              if (udpReady) {
-                udp.broadcastToRoom(room, 'UPDATE_POS', normalizedData);
-              }
-              socket.to(room).emit('UPDATE_POS', normalizedData);
-            }
+            emitToNearbyRooms(coords.cx, coords.cy, 'UPDATE_POS', normalizedData, socket.id);
           } else {
-            socket.broadcast.emit('UPDATE_POS', normalizedData);
+            emitToAll('UPDATE_POS', normalizedData, socket.id);
           }
         }
         // Always update holding if present
@@ -1270,43 +1315,35 @@ refreshSummaryCache();
           moveSocketToChunkRoom(socket, playerCoords);
         }
 
-        const emitToNearby = (event, payload) => {
+        if (hasVisual) {
           if (playerCoords) {
-            // Emit to the player's 3x3 chunk room grid via UDP when available
-            const rooms = getNeighborRooms(playerCoords.cx, playerCoords.cy);
-            for (const room of rooms) {
-              if (udpReady) {
-                udp.broadcastToRoom(room, event, payload);
-              }
-              socket.to(room).emit(event, payload);
+            emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData, socket.id);
+            for (const evt of visualEvents) {
+              emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'ABILITY_VISUAL', evt, socket.id);
             }
           } else {
-            socket.broadcast.emit(event, payload);
-          }
-        };
-
-        if (hasVisual) {
-          emitToNearby('UPDATE_PLAYER', normalizedData);
-          // Also emit explicit visual event to nearby clients
-          for (const evt of visualEvents) {
-            emitToNearby('ABILITY_VISUAL', evt);
+            emitToAll('UPDATE_PLAYER', normalizedData, socket.id);
+            for (const evt of visualEvents) {
+              emitToAll('ABILITY_VISUAL', evt, socket.id);
+            }
           }
         } else {
           if (data.pos || data.holding) {
-            emitToNearby('UPDATE_PLAYER', normalizedData);
+            if (playerCoords) {
+              emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData, socket.id);
+            } else {
+              emitToAll('UPDATE_PLAYER', normalizedData, socket.id);
+            }
           } else {
             // Only stat updates, send just to the player
-            io.to(data.id).emit('UPDATE_PLAYER', normalizedData);
+            emitToPlayer(data.id, 'UPDATE_PLAYER', normalizedData);
           }
         }
       }
 
       // Broadcast explosion events to nearby clients
       socket.on('EXPLOSION', (data) => {
-        if (udpReady) {
-          udp.emitAll('EXPLOSION', data);
-        }
-        socket.broadcast.emit('EXPLOSION', data);
+        emitToAll('EXPLOSION', data, socket.id);
       });
 
       // Sync movesSlots from client
@@ -1836,11 +1873,7 @@ refreshSummaryCache();
           }
         }
 
-        io.to(chunkRoom(data.cx, data.cy)).emit('UPDATE_NODES', data);
-        // Also broadcast via UDP for faster delivery
-        if (udpReady) {
-          udp.broadcastToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_NODES', data);
-        }
+        emitToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_NODES', data);
       }
 
       socket.on('update_iron_nodes', update_iron_nodes);
@@ -1960,11 +1993,7 @@ refreshSummaryCache();
             obj: itemBag,
           });
         }
-        io.to(chunkRoom(data.cx, data.cy)).emit('UPDATE_IRON_NODES', data);
-        // Also broadcast via UDP for faster delivery
-        if (udpReady) {
-          udp.broadcastToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_IRON_NODES', data);
-        }
+        emitToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_IRON_NODES', data);
       }
 
       socket.on('new_object', new_object);
@@ -2155,11 +2184,7 @@ refreshSummaryCache();
         if (chunk) {
           chunk.projectiles.push(data);
         }
-        // Use UDP for high-freq projectile broadcasts
-        if (udpReady) {
-          udp.emitAll('NEW_PROJECTILE', data);
-        }
-        socket.broadcast.emit('NEW_PROJECTILE', data);
+        emitToAll('NEW_PROJECTILE', data, socket.id);
       }
 
       socket.on('delete_proj', delete_projectile);
@@ -2179,11 +2204,7 @@ refreshSummaryCache();
           // Match by ID - most reliable identifier
           if (data.id == chunk.projectiles[i].id) {
             chunk.projectiles.splice(i, 1);
-            // Use UDP for high-freq projectile deletion
-            if (udpReady) {
-              udp.emitAll('DELETE_PROJ', data);
-            }
-            socket.broadcast.emit('DELETE_PROJ', data);
+            emitToAll('DELETE_PROJ', data, socket.id);
             break; // Exit after first match since IDs are unique
           }
         }
@@ -2195,11 +2216,7 @@ refreshSummaryCache();
         //add sounds to server map
         let chunk = serverMap.getChunk(data.cPos.x, data.cPos.y);
         chunk.soundObjs.push(data);
-        // Use UDP for sound broadcasts
-        if (udpReady) {
-          udp.emitAll('NEW_SOUND', data);
-        }
-        socket.broadcast.emit('NEW_SOUND', data);
+        emitToAll('NEW_SOUND', data, socket.id);
       }
 
       socket.on('delete_sound', delete_sound);
@@ -2229,11 +2246,7 @@ refreshSummaryCache();
               y: data.pos.y + Math.sin(angle) * 100,
             };
 
-            // Use UDP for wander target broadcasts
-            if (udpReady) {
-              udp.emitAll('WANDER_TARGET', { id: data.id, target: target });
-            }
-            io.emit('WANDER_TARGET', { id: data.id, target: target });
+            emitToAll('WANDER_TARGET', { id: data.id, target: target });
             serverMap.brains[i].target = target;
 
             i = serverMap.brains.length;
@@ -2473,16 +2486,9 @@ setInterval(() => {
           update_values: updateValues
         };
         if (coords) {
-          const room = chunkRoom(coords.cx, coords.cy);
-          if (udpReady) {
-            udp.broadcastToRoom(room, 'UPDATE_PLAYER', payload);
-          }
-          io.to(room).emit('UPDATE_PLAYER', payload);
+          emitToRoom(chunkRoom(coords.cx, coords.cy), 'UPDATE_PLAYER', payload);
         } else {
-          if (udpReady) {
-            udp.emitAll('UPDATE_PLAYER', payload);
-          }
-          io.emit('UPDATE_PLAYER', payload);
+          emitToAll('UPDATE_PLAYER', payload);
         }
       }
     });
@@ -2515,10 +2521,7 @@ setInterval(() => {
       }
     }
     for (const room of healedRooms) {
-      if (udpReady) {
-        udp.broadcastToRoom(room, 'HEAL_PLANTS', {});
-      }
-      io.to(room).emit('HEAL_PLANTS', {});
+      emitToRoom(room, 'HEAL_PLANTS', {});
     }
   }
 
@@ -2554,10 +2557,7 @@ setInterval(() => {
             hp: obj.hp,
             mhp: obj.mhp
           };
-          if (udpReady) {
-            udp.broadcastToRoom(chunkRoom(chunk.cx, chunk.cy), 'ENTITY_LEVEL_UPDATE', levelPayload);
-          }
-          io.to(chunkRoom(chunk.cx, chunk.cy)).emit('ENTITY_LEVEL_UPDATE', levelPayload);
+          emitToRoom(chunkRoom(chunk.cx, chunk.cy), 'ENTITY_LEVEL_UPDATE', levelPayload);
         }
       }
     }
@@ -2569,10 +2569,7 @@ setInterval(() => {
       totalSeconds: countdown,
       endsAt: timerEndAt,
     };
-    if (udpReady) {
-      udp.emitAll('sync_time', timeData);
-    }
-    io.emit('sync_time', timeData);
+    emitToAll('sync_time', timeData);
   }
 
   // Capture a pre-restart snapshot a few seconds before shutdown so clients have data
