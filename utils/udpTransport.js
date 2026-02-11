@@ -192,10 +192,18 @@ function sendToPlayer(socketId, event, data) {
 /** Broadcast to all UDP channels in a room. */
 function broadcastToRoom(roomName, event, data) {
   if (!udpServer) return;
-  try {
-    udpServer.room(roomName).emit(event, data);
-    metrics.messagesSent++;
-  } catch (_) { metrics.errors++; }
+  // geckos.io's native room() only supports ONE room per channel,
+  // but our game needs channels in multiple rooms (3×3 chunk grid).
+  // Iterate our own channelRooms map instead.
+  for (const [sid, ch] of channels.entries()) {
+    const rooms = channelRooms.get(ch.id);
+    if (rooms && rooms.has(roomName)) {
+      try {
+        ch.emit(event, data);
+        metrics.messagesSent++;
+      } catch (_) { metrics.errors++; }
+    }
+  }
 }
 
 /**
@@ -245,21 +253,19 @@ function emitAll(event, data, excludeSocketId) {
 function joinRoom(socketId, roomName) {
   const ch = channels.get(socketId);
   if (!ch) return;
-  try {
-    ch.join(roomName);
-    const rooms = channelRooms.get(ch.id);
-    if (rooms) rooms.add(roomName);
-  } catch (_) {}
+  // NOTE: We do NOT call ch.join(roomName) because geckos.io's native
+  // room system only supports ONE room per channel (ch.join overwrites).
+  // Instead we maintain our own multi-room tracking via channelRooms.
+  const rooms = channelRooms.get(ch.id);
+  if (rooms) rooms.add(roomName);
 }
 
 function leaveRoom(socketId, roomName) {
   const ch = channels.get(socketId);
   if (!ch) return;
-  try {
-    ch.leave(roomName);
-    const rooms = channelRooms.get(ch.id);
-    if (rooms) rooms.delete(roomName);
-  } catch (_) {}
+  // NOTE: We do NOT call ch.leave() — see joinRoom comment.
+  const rooms = channelRooms.get(ch.id);
+  if (rooms) rooms.delete(roomName);
 }
 
 // ────────────────────────────────────────────────────────────

@@ -534,17 +534,17 @@ udpClientHandlers['update_player'] = (data, socketId) => {
 
   if (hasVisual) {
     if (playerCoords) {
-      emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData);
-      for (const evt of visualEvents) emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'ABILITY_VISUAL', evt);
+      emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData, socketId);
+      for (const evt of visualEvents) emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'ABILITY_VISUAL', evt, socketId);
     } else {
-      emitToAll('UPDATE_PLAYER', normalizedData);
-      for (const evt of visualEvents) emitToAll('ABILITY_VISUAL', evt);
+      emitToAll('UPDATE_PLAYER', normalizedData, socketId);
+      for (const evt of visualEvents) emitToAll('ABILITY_VISUAL', evt, socketId);
     }
   } else if (data.pos || data.holding) {
     if (playerCoords) {
-      emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData);
+      emitToNearbyRooms(playerCoords.cx, playerCoords.cy, 'UPDATE_PLAYER', normalizedData, socketId);
     } else {
-      emitToAll('UPDATE_PLAYER', normalizedData);
+      emitToAll('UPDATE_PLAYER', normalizedData, socketId);
     }
   }
 };
@@ -663,7 +663,21 @@ udpClientHandlers['wander_request'] = (data, socketId) => {
   const ok = await udp.initUdpTransport(server, (socketId, channel) => {
     // Channel ready callback — notify the client that UDP is active
     io.to(socketId).emit('UDP_CONNECTED', { ok: true });
-    console.log(`[UDP] Channel ready for ${socketId}`);
+
+    // Sync the new UDP channel into the player's existing chunk rooms.
+    // If the player joined the game before the DataChannel opened,
+    // their Socket.IO socket is already in rooms but the UDP channel
+    // has none — this closes that gap so room-scoped broadcasts
+    // (UPDATE_NODE, etc.) reach the player immediately.
+    const currentRooms = socketChunkRooms.get(socketId);
+    if (currentRooms && currentRooms.rooms) {
+      for (const room of currentRooms.rooms) {
+        udp.joinRoom(socketId, room);
+      }
+      console.log(`[UDP] Channel ready for ${socketId} — synced ${currentRooms.rooms.length} rooms`);
+    } else {
+      console.log(`[UDP] Channel ready for ${socketId} — no rooms yet (player hasn't spawned)`);
+    }
   }, udpClientHandlers);
   if (ok) {
     udpReady = true;
