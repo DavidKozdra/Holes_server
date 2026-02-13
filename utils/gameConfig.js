@@ -21,6 +21,18 @@ const BAG_MERGE_BUDGET = 25;
 const CHUNK_EVICTION_INTERVAL_MS = 60 * 1000;
 const CHUNK_KEEP_RADIUS = 4;
 
+// ── AI Entity Spawning ──
+const ENTITY_RESPAWN_INTERVAL_S = 45;              // seconds between respawn sweeps
+const MAX_ENTITIES_PER_CHUNK = 5;                   // hard cap on brain entities per chunk
+const ANT_SPAWN_CHANCE = 1.0;                       // chance to spawn ants on chunk gen
+const ANT_MIN_PER_CHUNK = 1;                        // min ants on fresh chunk
+const ANT_MAX_PER_CHUNK = 3;                        // max ants on fresh chunk
+const RACE_ENTITY_SPAWN_CHANCE = 0.65;              // chance to spawn a race entity on chunk gen
+const RACE_MAX_PER_CHUNK = 2;                       // max race entities on fresh chunk
+const RESPAWN_CHANCE_ANT = 0.4;                     // per-chunk chance to respawn an ant each tick
+const RESPAWN_CHANCE_RACE = 0.15;                   // per-chunk chance to respawn a race entity each tick
+const RESPAWN_NEARBY_RADIUS = 3;                    // only respawn in chunks within this radius of players
+
 const BAD_WORDS = ['shit', 'fuck', 'bitch', 'cunt', 'nigg', 'asshole', 'cock', 'dick', 'fag', 'kike'];
 const BAD_WORD_REGEX = new RegExp(BAD_WORDS.join('|'), 'i');
 
@@ -71,6 +83,16 @@ module.exports = {
   BAG_MERGE_BUDGET,
   CHUNK_EVICTION_INTERVAL_MS,
   CHUNK_KEEP_RADIUS,
+  ENTITY_RESPAWN_INTERVAL_S,
+  MAX_ENTITIES_PER_CHUNK,
+  ANT_SPAWN_CHANCE,
+  ANT_MIN_PER_CHUNK,
+  ANT_MAX_PER_CHUNK,
+  RACE_ENTITY_SPAWN_CHANCE,
+  RACE_MAX_PER_CHUNK,
+  RESPAWN_CHANCE_ANT,
+  RESPAWN_CHANCE_RACE,
+  RESPAWN_NEARBY_RADIUS,
   BAD_WORDS,
   BAD_WORD_REGEX,
   SERVER_WELCOME_NEW,

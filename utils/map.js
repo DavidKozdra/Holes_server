@@ -33,62 +33,51 @@ class Map {
         }
       } catch (e) { avgPlayerLevel = 1; }
 
-      // Spawn ants in all chunks (including 0,0)
-      if (Math.random() < 1.0) {
-        let ant = new Placeable(
-          'Ant',
-          (Math.random() * CHUNKSIZE + x * CHUNKSIZE) * TILESIZE,
-          (Math.random() * CHUNKSIZE + y * CHUNKSIZE) * TILESIZE,
-          0,
-          17 * 2,
-          13 * 2,
-          2,
-          0,
-          'Server',
-          '',
-          100,
-        );
-        ant.brainID = Math.random() * 10000;
-        // Set ant level to at least avgPlayerLevel +- 10 at least 1
-        const minLevel = Math.max(1, avgPlayerLevel - 10);
-        const maxLevel = avgPlayerLevel + 10;
-        ant.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
+      // ── Spawn AI entities on chunk generation ──
+      const spawnCfg = require('./gameConfig');
+      const minLevel = Math.max(1, avgPlayerLevel - 10);
+      const maxLevel = avgPlayerLevel + 10;
+      const chunk = this.chunks[x + ',' + y];
 
-        this.chunks[x + ',' + y].objects.push(ant);
+      // Ants: spawn 1–3 per chunk
+      if (Math.random() < spawnCfg.ANT_SPAWN_CHANCE) {
+        const antCount = spawnCfg.ANT_MIN_PER_CHUNK +
+          Math.floor(Math.random() * (spawnCfg.ANT_MAX_PER_CHUNK - spawnCfg.ANT_MIN_PER_CHUNK + 1));
+        for (let a = 0; a < antCount; a++) {
+          const ant = new Placeable(
+            'Ant',
+            (Math.random() * CHUNKSIZE + x * CHUNKSIZE) * TILESIZE,
+            (Math.random() * CHUNKSIZE + y * CHUNKSIZE) * TILESIZE,
+            0, 17 * 2, 13 * 2, 2, 0, 'Server', '', 100,
+          );
+          ant.brainID = Math.random() * 1000000;
+          ant.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
+          this.brains.push({ id: ant.brainID, target: null });
+          chunk.objects.push(ant);
+        }
       }
 
-      const raceSpawnChance = 0.5; // doubled from 0.12
-      if (Math.random() < raceSpawnChance) {
-        const raceTypes = [
-          { name: 'Hostile Gnome', race: 0, hp: 120 },
-          { name: 'Wild Aylah', race: 1, hp: 100 },
-          { name: 'Feral Skizzard', race: 2, hp: 100 },
-        ];
-        const choice = raceTypes[Math.floor(Math.random() * raceTypes.length)];
-        const posX = (Math.random() * CHUNKSIZE + x * CHUNKSIZE) * TILESIZE;
-        const posY = (Math.random() * CHUNKSIZE + y * CHUNKSIZE) * TILESIZE;
-        const entity = new Placeable(
-          choice.name,
-          posX,
-          posY,
-          0,
-          66,
-          88,
-          2,
-          0,
-          'Server',
-          '',
-          choice.hp,
-        );
-        entity.brainID = Math.random() * 10000;
-        entity.race = choice.race;
-        // Set entity level to at least avgPlayerLevel
-        const minLevel = Math.max(1, avgPlayerLevel - 10);
-        const maxLevel = avgPlayerLevel + 10;
-        entity.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
-        
-        this.brains.push({ id: entity.brainID, target: null });
-        this.chunks[x + ',' + y].objects.push(entity);
+      // Race entities: up to RACE_MAX_PER_CHUNK, each rolled independently
+      const raceTypes = [
+        { name: 'Hostile Gnome', race: 0, hp: 120 },
+        { name: 'Wild Aylah',   race: 1, hp: 100 },
+        { name: 'Feral Skizzard', race: 2, hp: 100 },
+      ];
+      for (let r = 0; r < spawnCfg.RACE_MAX_PER_CHUNK; r++) {
+        if (Math.random() < spawnCfg.RACE_ENTITY_SPAWN_CHANCE) {
+          const choice = raceTypes[Math.floor(Math.random() * raceTypes.length)];
+          const entity = new Placeable(
+            choice.name,
+            (Math.random() * CHUNKSIZE + x * CHUNKSIZE) * TILESIZE,
+            (Math.random() * CHUNKSIZE + y * CHUNKSIZE) * TILESIZE,
+            0, 66, 88, 2, 0, 'Server', '', choice.hp,
+          );
+          entity.brainID = Math.random() * 1000000;
+          entity.race = choice.race;
+          entity.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
+          this.brains.push({ id: entity.brainID, target: null });
+          chunk.objects.push(entity);
+        }
       }
     }
     return this.chunks[x + ',' + y];

@@ -1,9 +1,13 @@
 const { exec } = require('child_process');
-const { Map: GameMap } = require('../utils/map');
+const { Map: GameMap, Placeable, TILESIZE, CHUNKSIZE } = require('../utils/map');
 const { chunkRoom, chunkCoordsFromPos } = require('../utils/chunkRooms');
 const { normalizePos, cloneHolding, queueWorldSave, setSavedPlayers } = require('../utils/playerUtils');
 const { clearState } = require('../utils/persistence');
-const { TIMER_DISABLED, RESTART_ON_TIMER } = require('../utils/gameConfig');
+const {
+  TIMER_DISABLED, RESTART_ON_TIMER,
+  ENTITY_RESPAWN_INTERVAL_S, MAX_ENTITIES_PER_CHUNK,
+  RESPAWN_CHANCE_ANT, RESPAWN_CHANCE_RACE, RESPAWN_NEARBY_RADIUS,
+} = require('../utils/gameConfig');
 
 /**
  * Start the 1-second game tick interval.
@@ -129,6 +133,100 @@ function startGameLoop(ctx) {
             };
             broadcast.emitToRoom(chunkRoom(chunk.cx, chunk.cy), 'ENTITY_LEVEL_UPDATE', levelPayload);
           }
+        }
+      }
+    }
+
+    // ── Entity Respawn — naturally repopulate chunks near players ──
+    if (ENTITY_RESPAWN_INTERVAL_S > 0 && countdown % ENTITY_RESPAWN_INTERVAL_S === 0) {
+      const serverMap = globals.serverMap;
+
+      // Build a set of chunk keys near active players
+      const nearbyChunkKeys = new Set();
+      Object.values(players).forEach(p => {
+        if (!p || !p.pos || !Number.isFinite(p.pos.x) || !Number.isFinite(p.pos.y)) return;
+        const pcx = Math.floor(p.pos.x / (TILESIZE * CHUNKSIZE));
+        const pcy = Math.floor(p.pos.y / (TILESIZE * CHUNKSIZE));
+        for (let dy = -RESPAWN_NEARBY_RADIUS; dy <= RESPAWN_NEARBY_RADIUS; dy++) {
+          for (let dx = -RESPAWN_NEARBY_RADIUS; dx <= RESPAWN_NEARBY_RADIUS; dx++) {
+            nearbyChunkKeys.add((pcx + dx) + ',' + (pcy + dy));
+          }
+        }
+      });
+
+      if (nearbyChunkKeys.size === 0) {
+        // No players online, skip respawn
+      } else {
+        // Average player level for entity scaling
+        let avgPlayerLevel = 1;
+        const pLevels = Object.values(players)
+          .map(p => (p?.statBlock?.stats?.level ?? p?.statBlock?.level ?? p?.level ?? 1))
+          .filter(l => typeof l === 'number' && l > 0);
+        if (pLevels.length > 0) avgPlayerLevel = Math.max(1, Math.floor(pLevels.reduce((a, b) => a + b, 0) / pLevels.length));
+        const minLevel = Math.max(1, avgPlayerLevel - 10);
+        const maxLevel = avgPlayerLevel + 10;
+
+        const raceTypes = [
+          { name: 'Hostile Gnome', race: 0, hp: 120 },
+          { name: 'Wild Aylah',   race: 1, hp: 100 },
+          { name: 'Feral Skizzard', race: 2, hp: 100 },
+        ];
+
+        let totalSpawned = 0;
+        for (const key of nearbyChunkKeys) {
+          const chunk = serverMap.chunks[key];
+          if (!chunk) continue;
+
+          // Count existing entities in this chunk
+          let entityCount = 0;
+          for (let j = 0; j < chunk.objects.length; j++) {
+            if (chunk.objects[j].brainID !== undefined) entityCount++;
+          }
+          if (entityCount >= MAX_ENTITIES_PER_CHUNK) continue;
+
+          const room = chunkRoom(chunk.cx, chunk.cy);
+
+          // Try spawning an ant
+          if (entityCount < MAX_ENTITIES_PER_CHUNK && Math.random() < RESPAWN_CHANCE_ANT) {
+            const ant = new Placeable(
+              'Ant',
+              (Math.random() * CHUNKSIZE + chunk.cx * CHUNKSIZE) * TILESIZE,
+              (Math.random() * CHUNKSIZE + chunk.cy * CHUNKSIZE) * TILESIZE,
+              0, 17 * 2, 13 * 2, 2, 0, 'Server', '', 100,
+            );
+            ant.brainID = Math.random() * 1000000;
+            ant.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
+            const brain = { id: ant.brainID, target: null };
+            serverMap.brains.push(brain);
+            chunk.objects.push(ant);
+            broadcast.emitToRoom(room, 'NEW_OBJECT', { cx: chunk.cx, cy: chunk.cy, obj: ant });
+            broadcast.emitToRoom(room, 'NEW_BRAIN', brain);
+            entityCount++;
+            totalSpawned++;
+          }
+
+          // Try spawning a race entity
+          if (entityCount < MAX_ENTITIES_PER_CHUNK && Math.random() < RESPAWN_CHANCE_RACE) {
+            const choice = raceTypes[Math.floor(Math.random() * raceTypes.length)];
+            const entity = new Placeable(
+              choice.name,
+              (Math.random() * CHUNKSIZE + chunk.cx * CHUNKSIZE) * TILESIZE,
+              (Math.random() * CHUNKSIZE + chunk.cy * CHUNKSIZE) * TILESIZE,
+              0, 66, 88, 2, 0, 'Server', '', choice.hp,
+            );
+            entity.brainID = Math.random() * 1000000;
+            entity.race = choice.race;
+            entity.level = Math.floor(Math.random() * (maxLevel - minLevel + 1)) + minLevel;
+            const brain = { id: entity.brainID, target: null };
+            serverMap.brains.push(brain);
+            chunk.objects.push(entity);
+            broadcast.emitToRoom(room, 'NEW_OBJECT', { cx: chunk.cx, cy: chunk.cy, obj: entity });
+            broadcast.emitToRoom(room, 'NEW_BRAIN', brain);
+            totalSpawned++;
+          }
+        }
+        if (totalSpawned > 0) {
+          console.log(`[Spawn] Respawned ${totalSpawned} entities across ${nearbyChunkKeys.size} nearby chunks`);
         }
       }
     }

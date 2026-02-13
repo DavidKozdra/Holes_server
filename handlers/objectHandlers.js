@@ -28,6 +28,11 @@ function register(socket, ctx) {
         if (data.z == chunk.objects[i].z && data.brainID == chunk.objects[i].brainID) {
           io.emit('DELETE_OBJ', data);
           chunk.objects.splice(i, 1);
+          // Remove the matching brain entry so it doesn't grow unbounded
+          const brains = getServerMap().brains;
+          for (let b = brains.length - 1; b >= 0; b--) {
+            if (brains[b].id == data.brainID) { brains.splice(b, 1); break; }
+          }
           spawnItemBag(chunk, data, io, () => mergeAllChunkBags(getServerMap(), io, BAG_MERGE_BUDGET));
         }
       } else {
