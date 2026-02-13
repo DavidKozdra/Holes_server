@@ -57,8 +57,7 @@ class Map {
         this.chunks[x + ',' + y].objects.push(ant);
       }
 
-      // Spawn race entities rarely (rarer than ants) anywhere
-      const raceSpawnChance = 0.3; // doubled from 0.12
+      const raceSpawnChance = 0.5; // doubled from 0.12
       if (Math.random() < raceSpawnChance) {
         const raceTypes = [
           { name: 'Hostile Gnome', race: 0, hp: 120 },
