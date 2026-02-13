@@ -34,7 +34,7 @@ class Map {
       } catch (e) { avgPlayerLevel = 1; }
 
       // Spawn ants in all chunks (including 0,0)
-      if (Math.random() < 0.5) {
+      if (Math.random() < 1.0) {
         let ant = new Placeable(
           'Ant',
           (Math.random() * CHUNKSIZE + x * CHUNKSIZE) * TILESIZE,
@@ -58,7 +58,7 @@ class Map {
       }
 
       // Spawn race entities rarely (rarer than ants) anywhere
-      const raceSpawnChance = 0.12; // ants are 0.5; this is ~4x rarer
+      const raceSpawnChance = 0.3; // doubled from 0.12
       if (Math.random() < raceSpawnChance) {
         const raceTypes = [
           { name: 'Hostile Gnome', race: 0, hp: 120 },
