@@ -124,7 +124,11 @@ function register(socket, ctx) {
 
   // ── save_player_state ──
   socket.on('save_player_state', (data = {}) => {
-    const p = players[socket.id] || {};
+    const p = players[socket.id];
+    if (!p || !p.name) {
+      io.to(socket.id).emit('PLAYER_SAVED', { ok: false });
+      return;
+    }
     console.log("save player", data.invBlock);
     if (data.invBlock) {
       p.invBlock = {
@@ -134,20 +138,20 @@ function register(socket, ctx) {
         equiped: data.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" },
       };
     }
-    if (data.statBlock) p.statBlock = data.statBlock;
+    // Only accept safe stat updates — don't let clients overwrite the entire statBlock
+    if (data.statBlock && p.statBlock) {
+      if (typeof data.statBlock.level === 'number') p.statBlock.level = data.statBlock.level;
+      if (typeof data.statBlock.xp === 'number') p.statBlock.xp = data.statBlock.xp;
+      if (typeof data.statBlock.xpNeeded === 'number') p.statBlock.xpNeeded = data.statBlock.xpNeeded;
+    }
     if (isValidPos(data.pos)) p.pos = data.pos;
     if (data.teamId !== undefined) p.teamId = data.teamId;
-    if (data.race !== undefined) p.race = data.race;
+    // Don't accept data.name — name is set server-side at join time
+    if (data.race !== undefined && typeof data.race === 'number') p.race = data.race;
     if (data.color !== undefined) p.color = data.color;
-    if (data.name) p.name = data.name;
     if (Array.isArray(data.movesSlots)) p.movesSlots = data.movesSlots;
 
-    if (!players[socket.id] && p.name) {
-      p.id = socket.id;
-      players[socket.id] = p;
-    }
-
-    const ok = savePlayerSnapshot(players[socket.id] || p);
+    const ok = savePlayerSnapshot(p);
     io.to(socket.id).emit('PLAYER_SAVED', { ok });
   });
 
@@ -171,7 +175,7 @@ function register(socket, ctx) {
       return;
     }
 
-    const brainID = Math.floor(Math.random() * 1000000).toString();
+    const brainID = Math.random() * 1000000;
     const brain = {
       id: brainID,
       target: { x, y },

@@ -9,8 +9,15 @@ function register(socket, ctx) {
 
   // ── new_object ──
   socket.on('new_object', (data) => {
+    if (!data || !data.obj || typeof data.cx !== 'number' || typeof data.cy !== 'number') return;
+    const obj = data.obj;
+    if (!obj.objName || typeof obj.objName !== 'string') return;
+    if (!obj.pos || typeof obj.pos.x !== 'number' || typeof obj.pos.y !== 'number') return;
+    // Strip any dangerous prototype-polluting keys
+    delete obj.__proto__;
+    delete obj.constructor;
     let chunk = getServerMap().getChunk(data.cx, data.cy);
-    chunk.objects.push(data.obj);
+    chunk.objects.push(obj);
     socket.broadcast.emit('NEW_OBJECT', data);
   });
 
@@ -51,7 +58,13 @@ function register(socket, ctx) {
   });
 
   // ── update_obj ──
+  const ALLOWED_OBJ_UPDATE_FIELDS = new Set([
+    'hp', 'pos', 'rot', 'openBool', 'stage',
+    'color', 'ownerName', 'flightPath',
+  ]);
+
   socket.on('update_obj', (data) => {
+    if (!data || !data.update_name || !ALLOWED_OBJ_UPDATE_FIELDS.has(data.update_name)) return;
     let chunk = getServerMap().getChunk(data.cx, data.cy);
     for (let i = chunk.objects.length - 1; i >= 0; i--) {
       if (data.objName == 'ExpOrb') {

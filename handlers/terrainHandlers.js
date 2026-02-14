@@ -53,10 +53,10 @@ function applyMultiNode(serverMap, data, isIron) {
         let index;
         if (y < 0 && x >= 0 && x < CHUNKSIZE) {
           tempChunk = serverMap.getChunk(data.cx, data.cy - 1);
-          index = x + 1 + y * CHUNKSIZE;
+          index = x + (CHUNKSIZE + y) * CHUNKSIZE;
         } else if (y >= CHUNKSIZE && x >= 0 && x < CHUNKSIZE) {
           tempChunk = serverMap.getChunk(data.cx, data.cy + 1);
-          index = x - 1 + (y - CHUNKSIZE) * CHUNKSIZE;
+          index = x + (y - CHUNKSIZE) * CHUNKSIZE;
         } else if (x < 0 && y >= 0 && y < CHUNKSIZE) {
           tempChunk = serverMap.getChunk(data.cx - 1, data.cy);
           index = (CHUNKSIZE + x) + y * CHUNKSIZE;
@@ -65,16 +65,16 @@ function applyMultiNode(serverMap, data, isIron) {
           index = (x - CHUNKSIZE) + y * CHUNKSIZE;
         } else if (x < 0 && y < 0) {
           tempChunk = serverMap.getChunk(data.cx - 1, data.cy - 1);
-          index = (CHUNKSIZE + x + 1) + (CHUNKSIZE + y) * CHUNKSIZE;
+          index = (CHUNKSIZE + x) + (CHUNKSIZE + y) * CHUNKSIZE;
         } else if (x >= CHUNKSIZE && y < 0) {
           tempChunk = serverMap.getChunk(data.cx + 1, data.cy - 1);
-          index = (x - CHUNKSIZE + 1) + (CHUNKSIZE + y) * CHUNKSIZE;
+          index = (x - CHUNKSIZE) + (CHUNKSIZE + y) * CHUNKSIZE;
         } else if (x < 0 && y >= CHUNKSIZE) {
           tempChunk = serverMap.getChunk(data.cx - 1, data.cy + 1);
-          index = (CHUNKSIZE + x - 1) + (y - CHUNKSIZE) * CHUNKSIZE;
+          index = (CHUNKSIZE + x) + (y - CHUNKSIZE) * CHUNKSIZE;
         } else if (x >= CHUNKSIZE && y >= CHUNKSIZE) {
           tempChunk = serverMap.getChunk(data.cx + 1, data.cy + 1);
-          index = (x - CHUNKSIZE - 1) + (y - CHUNKSIZE) * CHUNKSIZE;
+          index = (x - CHUNKSIZE) + (y - CHUNKSIZE) * CHUNKSIZE;
         }
         if (tempChunk != undefined && index != undefined) {
           if (data.amt > 0) {

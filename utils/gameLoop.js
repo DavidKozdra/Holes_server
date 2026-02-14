@@ -82,7 +82,7 @@ function startGameLoop(ctx) {
     }
 
     // Plant healing every 30 seconds
-    if (countdown % 30 === 0 || countdown <= 15 / 2) {
+    if (countdown % 30 === 0) {
       const serverMap = globals.serverMap;
       let keys = Object.keys(serverMap.chunks);
       const healedRooms = new Set();
