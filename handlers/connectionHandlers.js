@@ -292,24 +292,47 @@ function register(socket, ctx) {
     if (!isValidPos(incoming.pos)) {
       incoming.pos = players[incoming.id]?.pos || { x: 0, y: 0 };
     }
+
+    // Retrieve existing server-side player or saved snapshot to preserve authoritative data
+    const oldPlayer = (data.oldID && players[data.oldID]) ? players[data.oldID] : null;
+    const savedSnap = incoming.name ? savedPlayersByName[incoming.name] : null;
+
     if (data.oldID && data.oldID !== incoming.id) {
       delete players[data.oldID];
       socketChunkRooms.delete(data.oldID);
     }
-    players[incoming.id] = incoming;
+
+    // Build a sanitized player object — only trust safe fields from the client
+    const sanitized = {
+      id: incoming.id,
+      name: incoming.name,
+      pos: incoming.pos,
+      race: incoming.race ?? oldPlayer?.race ?? savedSnap?.race ?? null,
+      color: incoming.color ?? oldPlayer?.color ?? 0,
+      holding: incoming.holding || { w: false, a: false, s: false, d: false },
+      // Server-authoritative fields — never trust from client
+      kills: 0,
+      deaths: 0,
+      statBlock: oldPlayer?.statBlock ?? (savedSnap?.statBlock ? JSON.parse(JSON.stringify(savedSnap.statBlock)) : incoming.statBlock ?? null),
+      invBlock: oldPlayer?.invBlock ?? (savedSnap?.invBlock ? JSON.parse(JSON.stringify(savedSnap.invBlock)) : null),
+      passwordHash: oldPlayer?.passwordHash ?? savedSnap?.passwordHash ?? null,
+      teamId: oldPlayer?.teamId ?? savedSnap?.teamId ?? null,
+      maxDirtInv: oldPlayer?.maxDirtInv ?? (Number.isFinite(savedSnap?.maxDirtInv) ? savedSnap.maxDirtInv : 600),
+      isDead: oldPlayer?.isDead ?? false,
+    };
+
+    players[incoming.id] = sanitized;
+
     if (kills_deaths[data.oldID] != undefined) {
-      players[data.player.id].kills = kills_deaths[data.oldID].kills;
-      players[data.player.id].deaths = kills_deaths[data.oldID].deaths;
+      players[incoming.id].kills = kills_deaths[data.oldID].kills;
+      players[incoming.id].deaths = kills_deaths[data.oldID].deaths;
       delete kills_deaths[data.oldID];
-    } else {
-      players[data.player.id].kills = 0;
-      players[data.player.id].deaths = 0;
     }
 
-    const coords = chunkCoordsFromPos(players[data.player.id].pos);
+    const coords = chunkCoordsFromPos(players[incoming.id].pos);
     moveSocketToChunkRoom(socket, coords);
 
-    socket.broadcast.emit('NEW_PLAYER', sanitizePlayerForClient(data.player));
+    socket.broadcast.emit('NEW_PLAYER', sanitizePlayerForClient(players[incoming.id]));
     socket.broadcast.emit('PLAYERS_CHECK', { ids: Object.keys(players) });
     io.emit('TEAMS_UPDATE', { teams });
   });
@@ -336,35 +359,38 @@ function register(socket, ctx) {
   socket.on('disconnect', (reason) => {
     try { logger.info('Client disconnected', { id: socket.id, reason }); } catch {}
     console.log(socket.id + ' disconnected (reason: ' + reason + ')');
-    if (players[socket.id] != undefined) {
+
+    // Capture player name before deletion so the goodbye message is correct
+    const disconnectedPlayer = players[socket.id];
+    const playerName = (disconnectedPlayer && disconnectedPlayer.name) ? disconnectedPlayer.name : 'a player';
+
+    if (disconnectedPlayer != undefined) {
       console.log(
-        '{\n   id: ' + players[socket.id].id +
-        '\n   name: ' + players[socket.id].name +
-        '\n   kills: ' + players[socket.id].kills +
-        '\n   deaths: ' + players[socket.id].deaths + '\n}',
+        '{\n   id: ' + disconnectedPlayer.id +
+        '\n   name: ' + disconnectedPlayer.name +
+        '\n   kills: ' + disconnectedPlayer.kills +
+        '\n   deaths: ' + disconnectedPlayer.deaths + '\n}',
       );
       kills_deaths[socket.id] = {
-        kills: players[socket.id].kills,
-        deaths: players[socket.id].deaths,
+        kills: disconnectedPlayer.kills,
+        deaths: disconnectedPlayer.deaths,
       };
 
-      const p = players[socket.id];
-      if (p && p.name) {
-        const ok = savePlayerSnapshot(p);
-        console.log(ok ? `[SAVE] ✓ Snapshot saved for "${p.name}"` : `[SAVE] ✗ Snapshot failed for "${p.name}"`);
+      if (disconnectedPlayer.name) {
+        const ok = savePlayerSnapshot(disconnectedPlayer);
+        console.log(ok ? `[SAVE] ✓ Snapshot saved for "${disconnectedPlayer.name}"` : `[SAVE] ✗ Snapshot failed for "${disconnectedPlayer.name}"`);
       }
     }
 
-    players[socket.id] = [];
     delete players[socket.id];
     socketChunkRooms.delete(socket.id);
     udp.removeChannel(socket.id);
 
     io.emit('REMOVE_PLAYER', socket.id);
     io.emit('NEW_CHAT_MESSAGE', {
-      message: `Goodbye ${players[socket.id] ? players[socket.id].name : 'a player'}`,
+      message: `Goodbye ${playerName}`,
       x: 0, y: 0,
-      user: players[socket.id] ? players[socket.id].name : 'a player'
+      user: playerName
     });
   });
 

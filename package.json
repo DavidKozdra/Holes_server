@@ -4,7 +4,9 @@
   "description": "starts up a new holes server",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest --verbose",
+    "test:unit": "jest tests/unit --verbose",
+    "test:e2e": "jest tests/e2e --verbose",
     "start": "node server.js",
     "dev": " nodemon server.js",
     "prod": "pm2 start ecosystem.config.js --env production",
@@ -55,6 +57,7 @@
   },
   "devDependencies": {
     "husky": "^8.0.0",
+    "jest": "^30.2.0",
     "lint-staged": "^16.2.4",
     "pm2": "^6.0.5",
     "prettier": "^3.6.2"
