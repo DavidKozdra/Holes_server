@@ -1,4 +1,4 @@
-const { TILESIZE, CHUNKSIZE } = require('../utils/map');
+const { TILESIZE, CHUNKSIZE, Placeable } = require('../utils/map');
 const { chunkRoom, chunkCoordsFromPos, isValidPos, moveSocketToChunkRoom } = require('../utils/chunkRooms');
 const { normalizePos, cloneHolding } = require('../utils/playerUtils');
 const { applySingleNode, applyMultiNode } = require('./terrainHandlers');
@@ -91,7 +91,21 @@ function buildUdpHandlers(ctx) {
 
   handlers['update_iron_nodes'] = (data) => {
     if (!data || data.cx == null || data.cy == null) return;
-    applyMultiNode(ctx.getServerMap(), data, true);
+    const serverMap = ctx.getServerMap();
+    const { chunk, reward } = applyMultiNode(serverMap, data, true);
+
+    // Spawn Raw Metal bag from iron reward (mirrors Socket.IO handler)
+    if (reward > 0 && chunk) {
+      let itemBag = new Placeable('ItemBag', data.pos.x, data.pos.y, 0, 12 * 3, 13 * 3, 1, 11, '', '');
+      itemBag.type = 'InvObj';
+      itemBag.invBlock = { items: {} };
+      itemBag.invBlock.invId = Math.random() * 100000;
+      itemBag.invBlock.items['Raw Metal'] = {};
+      itemBag.invBlock.items['Raw Metal'].amount = Math.round(reward * 0.2) + 1;
+      chunk.objects.push(itemBag);
+      ctx.io.emit('NEW_OBJECT', { cx: chunk.cx, cy: chunk.cy, obj: itemBag });
+    }
+
     broadcast.emitToRoom(chunkRoom(data.cx, data.cy), 'UPDATE_IRON_NODES', data);
   };
 

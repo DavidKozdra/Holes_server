@@ -46,12 +46,15 @@ function spawnItemBag(chunk, data, io, mergeCallback) {
           }
         }
       }
-      chunk.objects.push(itemBag);
-      io.emit('NEW_OBJECT', {
-        cx: chunk.cx,
-        cy: chunk.cy,
-        obj: itemBag,
-      });
+      // Only create the bag if it actually has items (skip empty bags from all-dirt or failed probability)
+      if (Object.keys(itemBag.invBlock.items).length > 0) {
+        chunk.objects.push(itemBag);
+        io.emit('NEW_OBJECT', {
+          cx: chunk.cx,
+          cy: chunk.cy,
+          obj: itemBag,
+        });
+      }
     }
   }
 
@@ -188,19 +191,48 @@ function mergeAllChunkBags(serverMap, io, maxMerges = Infinity) {
           z: removed?.z ?? 0,
         });
       }
-    }
 
-    for (const idx of dirtyBags) {
-      const bag = chunk.objects[idx];
-      if (!bag) continue;
-      io.to(room).emit('UPDATE_INV', {
-        cx: roomCx,
-        cy: roomCy,
-        objName: bag.objName,
-        pos: { x: bag.pos.x, y: bag.pos.y },
-        z: bag.z,
-        items: bag.invBlock.items,
-      });
+      // Remap dirty bag indices — each splice shifts later indices down.
+      // Build a correction offset for each dirty index by counting how many
+      // removed indices were below it.
+      const removedArr = sorted.slice().sort((a, b) => a - b); // ascending
+      const remappedDirty = [];
+      for (const dIdx of dirtyBags) {
+        if (toRemove.has(dIdx)) continue; // was merged away
+        let shift = 0;
+        for (const rIdx of removedArr) {
+          if (rIdx < dIdx) shift++;
+          else break;
+        }
+        remappedDirty.push(dIdx - shift);
+      }
+
+      for (const idx of remappedDirty) {
+        const bag = chunk.objects[idx];
+        if (!bag) continue;
+        io.to(room).emit('UPDATE_INV', {
+          cx: roomCx,
+          cy: roomCy,
+          objName: bag.objName,
+          pos: { x: bag.pos.x, y: bag.pos.y },
+          z: bag.z,
+          items: bag.invBlock.items,
+        });
+      }
+    } else {
+      // No removals — indices are still valid
+      for (const idx of dirtyBags) {
+        const bag = chunk.objects[idx];
+        if (!bag) continue;
+        io.to(room).emit('UPDATE_INV', {
+          cx: roomCx,
+          cy: roomCy,
+          objName: bag.objName,
+          pos: { x: bag.pos.x, y: bag.pos.y },
+          z: bag.z,
+          items: bag.invBlock.items,
+        });
+      }
     }
   }
 }
