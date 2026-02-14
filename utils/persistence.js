@@ -3,6 +3,7 @@ const path = require('path');
 const fsp = fs.promises;
 
 const SAVE_PATH = path.join(__dirname, '..', 'data', 'world.json');
+const BACKUP_PATH = path.join(__dirname, '..', 'data', 'world.backup.json');
 const WORLDS_DIR = path.join(__dirname, '..', 'data', 'worlds');
 
 // Async save queue to avoid blocking the event loop with full JSON writes
@@ -22,6 +23,15 @@ async function writePayload(payload) {
   await ensureDir();
   const tmpPath = `${SAVE_PATH}.tmp`;
   await fsp.writeFile(tmpPath, JSON.stringify(payload));
+  // Rotate: keep the previous save as a backup before overwriting
+  try {
+    if (fs.existsSync(SAVE_PATH)) {
+      await fsp.copyFile(SAVE_PATH, BACKUP_PATH);
+    }
+  } catch (e) {
+    // Non-fatal: backup rotation failed but primary save continues
+    console.warn('[Persistence] Backup rotation failed:', e.message);
+  }
   await fsp.rename(tmpPath, SAVE_PATH);
 }
 
@@ -149,15 +159,21 @@ function saveState({ players, serverMap, chatMessages, teams, playersSnapshot })
 }
 
 function loadState() {
-  try {
-    if (!fs.existsSync(SAVE_PATH)) return null;
-    const raw = fs.readFileSync(SAVE_PATH, 'utf-8');
-    const payload = JSON.parse(raw);
-    return payload;
-  } catch (e) {
-    console.error('Error loading world state:', e);
-    return null;
+  // Try primary save file first, fall back to backup if corrupted
+  for (const filePath of [SAVE_PATH, BACKUP_PATH]) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const payload = JSON.parse(raw);
+      if (filePath === BACKUP_PATH) {
+        console.warn('[Persistence] Primary save was missing/corrupt — loaded from backup');
+      }
+      return payload;
+    } catch (e) {
+      console.error(`[Persistence] Error loading ${path.basename(filePath)}:`, e.message);
+    }
   }
+  return null;
 }
 
 module.exports = { saveState, loadState, clearState, enqueueSave };

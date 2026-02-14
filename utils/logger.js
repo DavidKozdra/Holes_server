@@ -34,7 +34,10 @@ function serialize(meta) {
 function append(level, message, meta) {
   try {
     const line = `${new Date().toISOString()} [${level}] ${message}${meta ? ' ' + serialize(meta) : ''}\n`;
-    fs.appendFileSync(todayFile(), line);
+    // Use async write to avoid blocking the event loop on every log call
+    fs.appendFile(todayFile(), line, (err) => {
+      if (err) { /* ignore logging failures */ }
+    });
   } catch (e) {
     // ignore logging failures
   }
