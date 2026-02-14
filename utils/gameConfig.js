@@ -15,7 +15,7 @@ const SAVE_INTERVAL_HOURS = parseFloat(process.env.SAVE_INTERVAL_HOURS || '0.25'
 const SUMMARY_INTERVAL_MS = parseInt(process.env.SUMMARY_INTERVAL_MS || '30000', 10);
 const PLAYER_SAVE_DEBOUNCE_MS = parseInt(process.env.PLAYER_SAVE_DEBOUNCE_MS || '400', 10);
 
-const NODE_FLUSH_INTERVAL_MS = 75;
+const NODE_FLUSH_INTERVAL_MS = 30;  // was 75 — reduced for faster terrain broadcast to other players
 const BAG_MERGE_INTERVAL_MS = 150;
 const BAG_MERGE_BUDGET = 25;
 const CHUNK_EVICTION_INTERVAL_MS = 60 * 1000;
