@@ -116,16 +116,18 @@ describe('Map Module', () => {
       expect(c2.iron_data).toEqual(iron1);
     });
 
-    it('should produce DIFFERENT terrain from different seeds', () => {
+    it('should produce DIFFERENT terrain from different seeds (normal chunks)', () => {
+      // Create with seed A, snapshot chunk(0,0) data immediately
       const m1 = new GameMap(111);
-      const c1 = m1.getChunk(30, 30);
+      const data1 = [...m1.chunks['0,0'].data];
 
+      // Create with seed B, snapshot chunk(0,0) data immediately
       const m2 = new GameMap(999);
-      const c2 = m2.getChunk(30, 30);
+      const data2 = [...m2.chunks['0,0'].data];
 
-      // Terrain data should differ (extremely unlikely to be identical)
-      const same = c1.data.every((v, i) => v === c2.data[i]);
-      expect(same).toBe(false);
+      // The noise-generated values should differ between different seeds
+      const allSame = data1.every((v, i) => v === data2[i]);
+      expect(allSame).toBe(false);
     });
 
     it('should store the seed', () => {
