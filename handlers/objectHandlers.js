@@ -198,6 +198,40 @@ function register(socket, ctx) {
     }
   });
 
+  // ── entity_combat_xp — grant XP to an entity that landed a hit ──
+  socket.on('entity_combat_xp', (data) => {
+    if (!data || !data.cx || !data.cy || !data.brainID) return;
+    const cx = Number(data.cx);
+    const cy = Number(data.cy);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return;
+    const xpGain = 5; // XP per hit landed
+
+    const serverMap = getServerMap();
+    const key = cx + ',' + cy;
+    const chunk = serverMap.chunks[key];
+    if (!chunk) return;
+    for (let j = 0; j < chunk.objects.length; j++) {
+      const obj = chunk.objects[j];
+      if (obj.brainID !== undefined && obj.brainID == data.brainID && obj.level !== undefined) {
+        obj.xp += xpGain;
+        while (obj.xp >= obj.xpNeeded) {
+          obj.level++;
+          obj.xp = 0;
+          obj.xpNeeded = Math.floor(obj.xpNeeded * 1.5);
+          obj.hp += 10;
+          obj.mhp += 10;
+        }
+        const levelPayload = {
+          cx, cy,
+          objPos: obj.pos, level: obj.level,
+          xp: obj.xp, hp: obj.hp, mhp: obj.mhp
+        };
+        broadcast.emitToRoom(chunkRoom(cx, cy), 'ENTITY_LEVEL_UPDATE', levelPayload);
+        break;
+      }
+    }
+  });
+
   // ── get_chunk ──
   socket.on('get_chunk', (data) => {
     let pos = data.split(',');

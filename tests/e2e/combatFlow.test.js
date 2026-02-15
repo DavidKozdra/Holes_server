@@ -173,17 +173,17 @@ describe('Combat Handlers — E2E Flows', () => {
 
       combatHandlers.register(socket, { io, players });
 
-      // Should not throw
+      // id matches socket.id (ownership check) but player is NOT in the map
       expect(() => {
         socket._listeners['player_dies']({
           x: 0, y: 0,
-          id: 'nobody',
+          id: 'ghost',
           attacker: 'Someone',
           name: 'Ghost',
         });
       }).not.toThrow();
 
-      expect(io.emit).toHaveBeenCalledWith('PLAYER_MARKED_DEAD', { id: 'nobody' });
+      expect(io.emit).toHaveBeenCalledWith('PLAYER_MARKED_DEAD', { id: 'ghost' });
     });
   });
 });
