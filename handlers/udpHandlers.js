@@ -11,6 +11,17 @@ function buildUdpHandlers(ctx) {
   const handlers = {};
   const { players, broadcast } = ctx;
 
+  const ALLOWED_UPDATE_FIELDS = new Set([
+    'stats.hp', 'stats.mp', 'stats.mhp', 'stats.mmp',
+    'stats.attack', 'stats.magic', 'stats.magicResistance',
+    'stats.luck', 'stats.runningSpeed', 'stats.healthRegen',
+    'statBlock.level', 'statBlock.xp', 'statBlock.xpNeeded',
+    'forcefieldActive', 'isDashing', 'flashTimer',
+    'particles', 'meditateActive', 'auraTimer',
+    'dashTimer', 'combustionActive', 'isDead',
+    'color', 'maxDirtInv',
+  ]);
+
   handlers['update_player'] = (data, socketId) => {
     if (!data || !data.id) return;
     if (data.id !== socketId) return;
@@ -21,8 +32,9 @@ function buildUdpHandlers(ctx) {
     for (let i = 0; i < (data.update_names || []).length; i++) {
       const name = data.update_names[i];
       const value = data.update_values[i];
+      if (!ALLOWED_UPDATE_FIELDS.has(name)) continue;
       if (name.includes('stats')) {
-        if (players[data.id].statBlock) players[data.id].statBlock.stats[name.split('stats.')[1]] = value;
+        if (players[data.id].statBlock && players[data.id].statBlock.stats) players[data.id].statBlock.stats[name.split('stats.')[1]] = value;
       } else if (name.includes('statBlock')) {
         if (players[data.id].statBlock) players[data.id].statBlock[name.split('statBlock.')[1]] = value;
       } else {

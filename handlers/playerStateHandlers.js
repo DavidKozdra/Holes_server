@@ -7,6 +7,7 @@ function register(socket, ctx) {
   // ── update_pos ──
   socket.on('update_pos', (data) => {
     if (!players[data.id]) return;
+    if (data.id !== socket.id) return;
 
     if (isValidPos(data.pos)) {
       players[data.id].pos = data.pos;
@@ -54,9 +55,13 @@ function register(socket, ctx) {
       const value = data.update_values[i];
       if (!ALLOWED_UPDATE_FIELDS.has(name)) continue;
       if (name.includes('stats')) {
-        players[data.id].statBlock.stats[name.split('stats.')[1]] = value;
+        if (players[data.id].statBlock && players[data.id].statBlock.stats) {
+          players[data.id].statBlock.stats[name.split('stats.')[1]] = value;
+        }
       } else if (name.includes('statBlock')) {
-        players[data.id].statBlock[name.split('statBlock.')[1]] = value;
+        if (players[data.id].statBlock) {
+          players[data.id].statBlock[name.split('statBlock.')[1]] = value;
+        }
       } else {
         players[data.id][name] = value;
         if (name === 'forcefieldActive' || name === 'isDashing' || name === 'flashTimer' ||

@@ -44,6 +44,7 @@ function register(socket, ctx) {
         }
       } else {
         if (
+          data.pos &&
           data.pos.x == chunk.objects[i].pos.x &&
           data.pos.y == chunk.objects[i].pos.y &&
           data.z == chunk.objects[i].z &&
@@ -82,6 +83,7 @@ function register(socket, ctx) {
         }
       } else {
         if (
+          data.pos &&
           data.pos.x == chunk.objects[i].pos.x &&
           data.pos.y == chunk.objects[i].pos.y &&
           data.z == chunk.objects[i].z &&
@@ -159,6 +161,7 @@ function register(socket, ctx) {
 
   // ── new_sound ──
   socket.on('new_sound', (data) => {
+    if (!data || !data.cPos || typeof data.cPos.x !== 'number' || typeof data.cPos.y !== 'number') return;
     let chunk = getServerMap().getChunk(data.cPos.x, data.cPos.y);
     chunk.soundObjs.push(data);
     broadcast.emitToAll('NEW_SOUND', data, socket.id);
@@ -166,6 +169,8 @@ function register(socket, ctx) {
 
   // ── delete_sound ──
   socket.on('delete_sound', (data) => {
+    if (!data || !data.cPos || typeof data.cPos.x !== 'number' || typeof data.cPos.y !== 'number') return;
+    if (!data.pos) return;
     let chunk = getServerMap().getChunk(data.cPos.x, data.cPos.y);
     for (let i = chunk.soundObjs.length - 1; i >= 0; i--) {
       if (
