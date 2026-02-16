@@ -8,6 +8,9 @@ function register(socket, ctx) {
   socket.on('player_dies', (data) => {
     const { x, y, id, attacker, name } = data;
 
+    // Only allow a client to report its own death
+    if (id !== socket.id) return;
+
     if (players[id]) {
       players[id].isDead = true;
       players[id].deaths += 1;
@@ -24,10 +27,10 @@ function register(socket, ctx) {
     for (let pid in players) {
       if (players.hasOwnProperty(pid)) {
         let player = players[pid];
-        if (player.name == attacker) {
+        if (player && player.name === attacker) {
           player.kills += 1;
         }
-        if (player && player.pos && typeof player.statBlock.stats.hearing === 'number') {
+        if (player && player.pos && player.statBlock && player.statBlock.stats && typeof player.statBlock.stats.hearing === 'number') {
           let dx = player.pos.x - x;
           let dy = player.pos.y - y;
           let distance = Math.sqrt(dx * dx + dy * dy);

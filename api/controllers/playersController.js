@@ -38,15 +38,14 @@ exports.getPlayerInfo = (req, res) => {
 exports.savePlayerData = (req, res) => {
   try {
     const playerData = req.body;
-    const { players, playerSnapshotCache } = globals;
-    const { saveState, loadState } = require('../../utils/persistence');
-    const { getGlobals } = require('../../globals');
+    const { players } = globals;
+    const { savePlayerSnapshot } = require('../../utils/playerUtils');
     
     if (!playerData || !playerData.playerName) {
       return res.status(400).json({ error: 'Invalid player data' });
     }
 
-    // Find the player by name in the current players object
+    // Find the player by name — only save what the SERVER already holds
     let playerSocket = null;
     for (let socketId in players) {
       if (players[socketId] && players[socketId].name === playerData.playerName) {
@@ -55,83 +54,15 @@ exports.savePlayerData = (req, res) => {
       }
     }
 
-    // Update player data with all latest values
-    if (playerSocket) {
-      // Update position
-      if (playerData.pos) {
-        playerSocket.pos = { x: playerData.pos.x, y: playerData.pos.y };
-      }
-      
-      // Update stats
-      if (playerData.statBlock) {
-        playerSocket.statBlock = {
-          race: playerData.statBlock.race ?? playerSocket.statBlock.race,
-          level: playerData.statBlock.level ?? playerSocket.statBlock.level,
-          xp: playerData.statBlock.xp ?? playerSocket.statBlock.xp,
-          xpNeeded: playerData.statBlock.xpNeeded ?? playerSocket.statBlock.xpNeeded,
-          stats: playerData.statBlock.stats ?? playerSocket.statBlock.stats
-        };
-      }
-      
-      // Update inventory
-      if (playerData.invBlock) {
-        playerSocket.invBlock = {
-          items: playerData.invBlock.items || {},
-          hotbar: playerData.invBlock.hotbar || ["","","","",""],
-          selectedHotBar: playerData.invBlock.selectedHotBar ?? 0,
-          equiped: playerData.invBlock.equiped || { head: "", neck: "", chest: "", legs: "", feet: "" }
-        };
-      }
-      
-      // Update team
-      if (playerData.teamId !== undefined) {
-        playerSocket.teamId = playerData.teamId;
-      }
-      
-      // Update color
-      if (playerData.color !== undefined) {
-        playerSocket.color = playerData.color;
-      }
-      
-      // Update race
-      if (playerData.race !== undefined) {
-        playerSocket.race = playerData.race;
-      }
-      
-      // Update move slots
-      if (playerData.movesSlots) {
-        playerSocket.movesSlots = playerData.movesSlots;
-      }
-      
-      console.log(`[API] Player data saved for "${playerData.playerName}" via beforeunload`);
+    if (!playerSocket) {
+      return res.status(404).json({ error: 'Player not found on server' });
     }
 
-    // Save to snapshot cache for persistence (preserve password hash if it exists)
-    if (playerSnapshotCache) {
-      const existingSnapshot = playerSnapshotCache[playerData.playerName] || {};
-      const mergedSnapshot = { ...existingSnapshot, ...playerData };
-      if (existingSnapshot.passwordHash) {
-        mergedSnapshot.passwordHash = existingSnapshot.passwordHash;
-      }
-      playerSnapshotCache[playerData.playerName] = mergedSnapshot;
-    }
-    
-    // Persist to disk
-    try {
-      const currentGlobals = getGlobals();
-      saveState({ 
-        players: currentGlobals.players, 
-        serverMap: currentGlobals.serverMap, 
-        chatMessages: currentGlobals.chatMessages, 
-        teams: currentGlobals.teams,
-        playersSnapshot: playerSnapshotCache 
-      });
-      console.log(`[API] Player snapshot persisted for "${playerData.playerName}"`);
-    } catch (e) {
-      console.warn(`[API] Failed to persist player snapshot:`, e);
-    }
+    // Save the server-authoritative data — do NOT trust req.body fields
+    const ok = savePlayerSnapshot(playerSocket);
+    console.log(`[API] Player snapshot persisted for "${playerData.playerName}"`);
 
-    res.json({ success: true, message: 'Player data saved' });
+    res.json({ success: ok, message: ok ? 'Player data saved' : 'Save failed' });
   } catch (error) {
     console.error('Error saving player data:', error);
     res.status(500).json({ error: 'Failed to save player data' });

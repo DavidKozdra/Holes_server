@@ -7,6 +7,7 @@ const { logger } = require('../utils/logger');
 const udp = require('../utils/udpTransport');
 
 let kills_deaths = {};
+const KILLS_DEATHS_MAX_ENTRIES = 500;
 
 function getKillsDeaths() { return kills_deaths; }
 function setKillsDeaths(kd) { kills_deaths = kd; }
@@ -190,7 +191,8 @@ function register(socket, ctx) {
 
   // ── request_my_items ──
   socket.on('request_my_items', (data) => {
-    const playerName = data.name;
+    const playerName = players[socket.id]?.name || data.name;
+    if (!playerName) return;
     const snap = savedPlayersByName[playerName];
     const hasInventory = !!(snap && snap.invBlock);
 
@@ -375,6 +377,15 @@ function register(socket, ctx) {
         kills: disconnectedPlayer.kills,
         deaths: disconnectedPlayer.deaths,
       };
+
+      // Evict oldest entries to prevent unbounded memory growth
+      const kdKeys = Object.keys(kills_deaths);
+      if (kdKeys.length > KILLS_DEATHS_MAX_ENTRIES) {
+        const excess = kdKeys.length - KILLS_DEATHS_MAX_ENTRIES;
+        for (let i = 0; i < excess; i++) {
+          delete kills_deaths[kdKeys[i]];
+        }
+      }
 
       if (disconnectedPlayer.name) {
         const ok = savePlayerSnapshot(disconnectedPlayer);

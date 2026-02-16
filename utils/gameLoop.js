@@ -82,7 +82,7 @@ function startGameLoop(ctx) {
     }
 
     // Plant healing every 30 seconds
-    if (countdown % 30 === 0 || countdown <= 15 / 2) {
+    if (countdown % 30 === 0) {
       const serverMap = globals.serverMap;
       let keys = Object.keys(serverMap.chunks);
       const healedRooms = new Set();
@@ -109,7 +109,7 @@ function startGameLoop(ctx) {
       }
     }
 
-    // Entity XP every 60 seconds
+    // Entity XP every 60 seconds (passive: reduced to 2 XP, activity-based XP is granted via combat events)
     if (countdown % 60 === 0) {
       const serverMap = globals.serverMap;
       let keys = Object.keys(serverMap.chunks);
@@ -118,7 +118,7 @@ function startGameLoop(ctx) {
         for (let j = 0; j < chunk.objects.length; j++) {
           let obj = chunk.objects[j];
           if (obj.brainID !== undefined && obj.level !== undefined) {
-            obj.xp += 10;
+            obj.xp += 2; // Reduced from 10 — most XP should come from combat
             while (obj.xp >= obj.xpNeeded) {
               obj.level++;
               obj.xp = 0;

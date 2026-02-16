@@ -9,8 +9,15 @@ function register(socket, ctx) {
 
   // ── new_object ──
   socket.on('new_object', (data) => {
+    if (!data || !data.obj || typeof data.cx !== 'number' || typeof data.cy !== 'number') return;
+    const obj = data.obj;
+    if (!obj.objName || typeof obj.objName !== 'string') return;
+    if (!obj.pos || typeof obj.pos.x !== 'number' || typeof obj.pos.y !== 'number') return;
+    // Strip any dangerous prototype-polluting keys
+    delete obj.__proto__;
+    delete obj.constructor;
     let chunk = getServerMap().getChunk(data.cx, data.cy);
-    chunk.objects.push(data.obj);
+    chunk.objects.push(obj);
     socket.broadcast.emit('NEW_OBJECT', data);
   });
 
@@ -37,6 +44,7 @@ function register(socket, ctx) {
         }
       } else {
         if (
+          data.pos &&
           data.pos.x == chunk.objects[i].pos.x &&
           data.pos.y == chunk.objects[i].pos.y &&
           data.z == chunk.objects[i].z &&
@@ -51,7 +59,13 @@ function register(socket, ctx) {
   });
 
   // ── update_obj ──
+  const ALLOWED_OBJ_UPDATE_FIELDS = new Set([
+    'hp', 'pos', 'rot', 'openBool', 'stage',
+    'color', 'ownerName', 'flightPath',
+  ]);
+
   socket.on('update_obj', (data) => {
+    if (!data || !data.update_name || !ALLOWED_OBJ_UPDATE_FIELDS.has(data.update_name)) return;
     let chunk = getServerMap().getChunk(data.cx, data.cy);
     for (let i = chunk.objects.length - 1; i >= 0; i--) {
       if (data.objName == 'ExpOrb') {
@@ -69,6 +83,7 @@ function register(socket, ctx) {
         }
       } else {
         if (
+          data.pos &&
           data.pos.x == chunk.objects[i].pos.x &&
           data.pos.y == chunk.objects[i].pos.y &&
           data.z == chunk.objects[i].z &&
@@ -146,6 +161,7 @@ function register(socket, ctx) {
 
   // ── new_sound ──
   socket.on('new_sound', (data) => {
+    if (!data || !data.cPos || typeof data.cPos.x !== 'number' || typeof data.cPos.y !== 'number') return;
     let chunk = getServerMap().getChunk(data.cPos.x, data.cPos.y);
     chunk.soundObjs.push(data);
     broadcast.emitToAll('NEW_SOUND', data, socket.id);
@@ -153,6 +169,8 @@ function register(socket, ctx) {
 
   // ── delete_sound ──
   socket.on('delete_sound', (data) => {
+    if (!data || !data.cPos || typeof data.cPos.x !== 'number' || typeof data.cPos.y !== 'number') return;
+    if (!data.pos) return;
     let chunk = getServerMap().getChunk(data.cPos.x, data.cPos.y);
     for (let i = chunk.soundObjs.length - 1; i >= 0; i--) {
       if (
@@ -175,6 +193,40 @@ function register(socket, ctx) {
         let target = { x: data.pos.x + Math.cos(angle) * 100, y: data.pos.y + Math.sin(angle) * 100 };
         broadcast.emitToAll('WANDER_TARGET', { id: data.id, target: target });
         serverMap.brains[i].target = target;
+        break;
+      }
+    }
+  });
+
+  // ── entity_combat_xp — grant XP to an entity that landed a hit ──
+  socket.on('entity_combat_xp', (data) => {
+    if (!data || !data.cx || !data.cy || !data.brainID) return;
+    const cx = Number(data.cx);
+    const cy = Number(data.cy);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return;
+    const xpGain = 5; // XP per hit landed
+
+    const serverMap = getServerMap();
+    const key = cx + ',' + cy;
+    const chunk = serverMap.chunks[key];
+    if (!chunk) return;
+    for (let j = 0; j < chunk.objects.length; j++) {
+      const obj = chunk.objects[j];
+      if (obj.brainID !== undefined && obj.brainID == data.brainID && obj.level !== undefined) {
+        obj.xp += xpGain;
+        while (obj.xp >= obj.xpNeeded) {
+          obj.level++;
+          obj.xp = 0;
+          obj.xpNeeded = Math.floor(obj.xpNeeded * 1.5);
+          obj.hp += 10;
+          obj.mhp += 10;
+        }
+        const levelPayload = {
+          cx, cy,
+          objPos: obj.pos, level: obj.level,
+          xp: obj.xp, hp: obj.hp, mhp: obj.mhp
+        };
+        broadcast.emitToRoom(chunkRoom(cx, cy), 'ENTITY_LEVEL_UPDATE', levelPayload);
         break;
       }
     }
