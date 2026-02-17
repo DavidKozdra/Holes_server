@@ -7,7 +7,15 @@ function sanitizeItems(items) {
   for (const k of Object.keys(items)) {
     const v = items[k];
     const amt = v && typeof v.amount === 'number' ? v.amount : Number(v?.amount);
-    if (Number.isFinite(amt) && amt > 0) cleaned[k] = { amount: Math.floor(amt) };
+    if (Number.isFinite(amt) && amt > 0) {
+      cleaned[k] = { amount: Math.floor(amt) };
+      if (typeof v.durability === 'number') {
+        cleaned[k].durability = v.durability;
+      }
+      if (typeof v.maxDurability === 'number') {
+        cleaned[k].maxDurability = v.maxDurability;
+      }
+    }
   }
   return cleaned;
 }
